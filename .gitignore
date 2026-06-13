@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build outputs
+/outputs/
+/work/DailyReminderWidget/icon.iconset/
+/work/DailyReminderWidget/dmgroot/
+*.app
+*.dmg
+*.icns
+
+# Swift build artifacts
+.build/
+DerivedData/
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Local scratch files used during visual iteration
+/work/*.swift
+/work/*.png
+/work/DailyReminderWidget/make_icon.py
