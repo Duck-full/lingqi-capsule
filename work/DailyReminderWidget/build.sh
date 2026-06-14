@@ -4,13 +4,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT_ROOT="$ROOT/../../outputs"
 APP_NAME="小Ding助手"
-BUNDLE_ID="local.codex.daily-reminder-widget"
+BUNDLE_ID="local.codex.xiaoding-assistant"
+APP_VERSION="1.1.0"
+APP_BUILD="2"
 APP="$OUT_ROOT/$APP_NAME.app"
 DMG_ROOT="$ROOT/dmgroot"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 DEFAULT_ICON="$ROOT/Assets/AppIcon.png"
+NOTIFICATION_ICON="$ROOT/Assets/NotificationIcon.png"
 
 rm -rf "$APP" "$OUT_ROOT/$APP_NAME.dmg" "$ROOT/icon.iconset" "$DMG_ROOT"
 mkdir -p "$MACOS" "$RESOURCES" "$ROOT/icon.iconset"
@@ -25,6 +28,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>
     <string>DailyReminderWidget</string>
     <key>CFBundleIconFile</key>
+    <string>AppIcon.icns</string>
+    <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
@@ -37,9 +42,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$APP_BUILD</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.1</string>
     <key>LSApplicationCategoryType</key>
@@ -71,6 +76,12 @@ else
   swift "$ROOT/make_icon.swift" "$ROOT/icon.iconset"
 fi
 iconutil -c icns "$ROOT/icon.iconset" -o "$RESOURCES/AppIcon.icns"
+if [[ -f "$NOTIFICATION_ICON" ]]; then
+  cp "$NOTIFICATION_ICON" "$RESOURCES/NotificationIcon.png"
+fi
+if [[ -f "$DEFAULT_ICON" ]]; then
+  cp "$DEFAULT_ICON" "$RESOURCES/AppIcon.png"
+fi
 
 for ARCH in x86_64 arm64; do
   swiftc \

@@ -216,7 +216,7 @@ enum NoteExporter {
     private static func saveURL(extensionName: String, date: Date) -> URL? {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "每日记事-\(DateKey.string(from: date)).\(extensionName)"
+        panel.nameFieldStringValue = "今日灵感胶囊-\(DateKey.string(from: date)).\(extensionName)"
         if let type = UTType(filenameExtension: extensionName) {
             panel.allowedContentTypes = [type]
         }
@@ -237,7 +237,7 @@ enum NoteExporter {
           </style>
         </head>
         <body>
-          <h1>每日记事</h1>
+          <h1>今日灵感胶囊</h1>
           <div class="date">\(escape(DateKey.display(from: date)))</div>
           <div class="note">\(escape(note))</div>
         </body>
@@ -299,11 +299,32 @@ final class NotePDFView: NSView {
             }()
         ]
 
-        ("每日记事" as NSString).draw(at: NSPoint(x: margin, y: bounds.height - 80), withAttributes: titleAttrs)
+        ("今日灵感胶囊" as NSString).draw(at: NSPoint(x: margin, y: bounds.height - 80), withAttributes: titleAttrs)
         (dateTitle as NSString).draw(at: NSPoint(x: margin, y: bounds.height - 108), withAttributes: dateAttrs)
         let bodyRect = NSRect(x: margin, y: margin, width: pageWidth - margin * 2, height: bounds.height - 180)
         (note.isEmpty ? "这一天还没有记录。" : note as NSString).draw(in: bodyRect, withAttributes: bodyAttrs)
     }
+}
+
+struct EmotionalCopy {
+    let title: String
+    let message: String
+    let symbol: String
+
+    static let greetings: [EmotionalCopy] = [
+        EmotionalCopy(title: "今天也轻一点", message: "先把最重要的一件事放到眼前，剩下的慢慢来。", symbol: "sun.max.fill"),
+        EmotionalCopy(title: "欢迎回来", message: "小Ding已经准备好陪你把今天拆成更容易完成的小步。", symbol: "sparkles"),
+        EmotionalCopy(title: "给大脑留点余地", message: "事项可以被记录，心里就不用一直惦记。", symbol: "heart.text.square.fill"),
+        EmotionalCopy(title: "从容开工", message: "不用一下子处理所有事，先选择一个清晰的开始。", symbol: "leaf.fill"),
+        EmotionalCopy(title: "你已经在路上", message: "打开这一刻，就算是今天的第一个微小推进。", symbol: "checkmark.seal.fill")
+    ]
+
+    static let restLines: [EmotionalCopy] = [
+        EmotionalCopy(title: "让眼睛慢慢松开", message: "看着柔和的线条移动，呼吸跟着变慢一点。", symbol: "moon.stars.fill"),
+        EmotionalCopy(title: "短暂停靠", message: "五分钟不算逃离，是给下一段专注补一点光。", symbol: "water.waves"),
+        EmotionalCopy(title: "把肩膀放下来", message: "此刻不用赶进度，只需要让注意力轻轻落地。", symbol: "cloud.moon.fill"),
+        EmotionalCopy(title: "休鼾一下", message: "屏幕安静下来，大脑也可以不用一直亮着。", symbol: "sparkle.magnifyingglass")
+    ]
 }
 
 final class AppIconManager: ObservableObject {
@@ -540,6 +561,7 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
         content.sound = .default
         content.categoryIdentifier = "REMINDER_ITEM"
         content.userInfo = ["itemID": item.id.uuidString]
+        attachNotificationIcon(to: content)
 
         let calendar = Calendar.current
         var dateComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: mergedDateAndTime(item.date, item.remindAt))
@@ -597,8 +619,17 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
         content.body = "如果你看到这条通知，说明 macOS 系统提醒已经可以正常工作。"
         content.sound = .default
         content.categoryIdentifier = "REMINDER_ITEM"
+        attachNotificationIcon(to: content)
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 3, repeats: false)
         add(content: content, trigger: trigger, id: "system-notification-test-\(UUID().uuidString)")
+    }
+
+    private func attachNotificationIcon(to content: UNMutableNotificationContent) {
+        guard let url = Bundle.main.url(forResource: "NotificationIcon", withExtension: "png"),
+              let attachment = try? UNNotificationAttachment(identifier: "xiaoding-notification-icon", url: url, options: nil) else {
+            return
+        }
+        content.attachments = [attachment]
     }
 
     private func mergedDateAndTime(_ date: Date, _ time: Date) -> Date {
@@ -629,6 +660,7 @@ struct DailyReminderWidgetApp: App {
     @StateObject private var noteStore = NoteStore()
     @StateObject private var iconManager = AppIconManager()
     @StateObject private var weatherStore = WeatherStore()
+    @AppStorage("selectedTheme") private var selectedThemeRaw = AppTheme.ancientInk.rawValue
 
     var body: some Scene {
         WindowGroup {
@@ -644,6 +676,14 @@ struct DailyReminderWidgetApp: App {
         .commands {
             CommandGroup(replacing: .newItem) { }
         }
+
+        MenuBarExtra("小Ding助手", systemImage: "checklist") {
+            MenuBarQuickPanel()
+                .environmentObject(store)
+                .environmentObject(noteStore)
+                .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .ancientInk)
+        }
+        .menuBarExtraStyle(.window)
     }
 }
 
@@ -660,6 +700,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 window.center()
             }
         }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 }
 
@@ -682,8 +726,15 @@ struct ThemePalette {
     var lavender: Color { glowB }
 }
 
+private let inspirationCharacterLimit = 300
+
 enum AppTheme: String, CaseIterable, Identifiable {
     case neonPulse
+    case ios27Glass
+    case weatherChild
+    case yourName
+    case demonBlade
+    case natsumeBook
     case futureTech
     case cartoonPop
     case ancientInk
@@ -698,6 +749,11 @@ enum AppTheme: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .neonPulse: return "霓虹脉冲"
+        case .ios27Glass: return "iOS27 毛玻璃"
+        case .weatherChild: return "天气之子"
+        case .yourName: return "你的名字"
+        case .demonBlade: return "鬼灭之刃"
+        case .natsumeBook: return "夏目友人帐"
         case .futureTech: return "未来科技感"
         case .cartoonPop: return "卡通风格"
         case .ancientInk: return "古风风格"
@@ -712,6 +768,11 @@ enum AppTheme: String, CaseIterable, Identifiable {
     var shortTitle: String {
         switch self {
         case .neonPulse: return "霓虹"
+        case .ios27Glass: return "玻璃"
+        case .weatherChild: return "晴雨"
+        case .yourName: return "星河"
+        case .demonBlade: return "刃纹"
+        case .natsumeBook: return "友人"
         case .futureTech: return "未来"
         case .cartoonPop: return "卡通"
         case .ancientInk: return "古风"
@@ -726,6 +787,11 @@ enum AppTheme: String, CaseIterable, Identifiable {
     var mood: String {
         switch self {
         case .neonPulse: return "今天的节奏很亮，慢慢推进也会抵达。"
+        case .ios27Glass: return "像一层清透玻璃，把今天的重点温柔托起来。"
+        case .weatherChild: return "云层会散开，先把心里那束光写下来。"
+        case .yourName: return "把今天的片段系成结，重要的事就不会走散。"
+        case .demonBlade: return "稳住呼吸，今天也可以利落地完成一件事。"
+        case .natsumeBook: return "温柔地记录吧，每个细小念头都值得被看见。"
         case .futureTech: return "像启动一段新程序，先跑通最小的一步。"
         case .cartoonPop: return "今天也可以轻快一点，完成一件就给自己加分。"
         case .ancientInk: return "心有章法，事有次第，慢慢来。"
@@ -734,6 +800,44 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case .deepOcean: return "安静也是效率，深呼吸后再开始。"
         case .roseNebula: return "把重要的事温柔地放到眼前。"
         case .graphiteLaser: return "清晰、克制、精准，今天就这样推进。"
+        }
+    }
+
+    var illustrationSymbol: String {
+        switch self {
+        case .neonPulse: return "sparkles"
+        case .ios27Glass: return "app.gift.fill"
+        case .weatherChild: return "cloud.sun.rain.fill"
+        case .yourName: return "sparkle"
+        case .demonBlade: return "flame.fill"
+        case .natsumeBook: return "leaf.circle.fill"
+        case .futureTech: return "cpu.fill"
+        case .cartoonPop: return "paintpalette.fill"
+        case .ancientInk: return "leaf.fill"
+        case .auroraMint: return "drop.fill"
+        case .sunsetSynth: return "sunset.fill"
+        case .deepOcean: return "water.waves"
+        case .roseNebula: return "heart.circle.fill"
+        case .graphiteLaser: return "scope"
+        }
+    }
+
+    var toneLine: String {
+        switch self {
+        case .neonPulse: return "把今天点亮一点"
+        case .ios27Glass: return "清透地开始"
+        case .weatherChild: return "等一阵晴光"
+        case .yourName: return "把片刻系紧"
+        case .demonBlade: return "稳住呼吸"
+        case .natsumeBook: return "温柔收集"
+        case .futureTech: return "启动清晰模式"
+        case .cartoonPop: return "轻快完成一件事"
+        case .ancientInk: return "慢而有章法"
+        case .auroraMint: return "保持清透呼吸"
+        case .sunsetSynth: return "给节奏一点余温"
+        case .deepOcean: return "沉稳推进"
+        case .roseNebula: return "温柔提醒重要事"
+        case .graphiteLaser: return "克制而精准"
         }
     }
 
@@ -749,6 +853,61 @@ enum AppTheme: String, CaseIterable, Identifiable {
                 accent: Color(red: 0.27, green: 0.78, blue: 1.0),
                 accent2: Color(red: 0.28, green: 0.34, blue: 1.0),
                 warm: Color(red: 1.0, green: 0.67, blue: 0.32)
+            )
+        case .ios27Glass:
+            return ThemePalette(
+                ink: Color(red: 0.05, green: 0.10, blue: 0.17),
+                plum: Color(red: 0.10, green: 0.20, blue: 0.34),
+                surface: Color(red: 0.08, green: 0.23, blue: 0.32),
+                glowA: Color(red: 0.58, green: 0.83, blue: 1.0),
+                glowB: Color(red: 0.52, green: 1.0, blue: 0.82),
+                accent: Color(red: 0.63, green: 0.86, blue: 1.0),
+                accent2: Color(red: 0.47, green: 0.76, blue: 1.0),
+                warm: Color(red: 0.82, green: 1.0, blue: 0.92)
+            )
+        case .weatherChild:
+            return ThemePalette(
+                ink: Color(red: 0.03, green: 0.12, blue: 0.22),
+                plum: Color(red: 0.06, green: 0.26, blue: 0.42),
+                surface: Color(red: 0.11, green: 0.34, blue: 0.50),
+                glowA: Color(red: 0.42, green: 0.78, blue: 1.0),
+                glowB: Color(red: 1.0, green: 0.76, blue: 0.30),
+                accent: Color(red: 0.42, green: 0.82, blue: 1.0),
+                accent2: Color(red: 0.20, green: 0.55, blue: 0.95),
+                warm: Color(red: 1.0, green: 0.82, blue: 0.38)
+            )
+        case .yourName:
+            return ThemePalette(
+                ink: Color(red: 0.07, green: 0.05, blue: 0.19),
+                plum: Color(red: 0.27, green: 0.10, blue: 0.34),
+                surface: Color(red: 0.12, green: 0.12, blue: 0.36),
+                glowA: Color(red: 0.50, green: 0.70, blue: 1.0),
+                glowB: Color(red: 1.0, green: 0.43, blue: 0.72),
+                accent: Color(red: 0.62, green: 0.76, blue: 1.0),
+                accent2: Color(red: 0.96, green: 0.42, blue: 0.74),
+                warm: Color(red: 1.0, green: 0.72, blue: 0.42)
+            )
+        case .demonBlade:
+            return ThemePalette(
+                ink: Color(red: 0.04, green: 0.06, blue: 0.07),
+                plum: Color(red: 0.12, green: 0.24, blue: 0.18),
+                surface: Color(red: 0.13, green: 0.08, blue: 0.08),
+                glowA: Color(red: 0.16, green: 0.82, blue: 0.60),
+                glowB: Color(red: 1.0, green: 0.18, blue: 0.14),
+                accent: Color(red: 0.28, green: 0.92, blue: 0.68),
+                accent2: Color(red: 0.95, green: 0.16, blue: 0.16),
+                warm: Color(red: 1.0, green: 0.72, blue: 0.34)
+            )
+        case .natsumeBook:
+            return ThemePalette(
+                ink: Color(red: 0.07, green: 0.12, blue: 0.08),
+                plum: Color(red: 0.17, green: 0.27, blue: 0.14),
+                surface: Color(red: 0.25, green: 0.20, blue: 0.12),
+                glowA: Color(red: 0.78, green: 0.94, blue: 0.48),
+                glowB: Color(red: 0.97, green: 0.78, blue: 0.42),
+                accent: Color(red: 0.82, green: 0.94, blue: 0.50),
+                accent2: Color(red: 0.62, green: 0.76, blue: 0.36),
+                warm: Color(red: 1.0, green: 0.82, blue: 0.48)
             )
         case .futureTech:
             return ThemePalette(
@@ -843,6 +1002,11 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     var backgroundStyle: ThemeBackgroundStyle {
         switch self {
+        case .ios27Glass: return .liquidGlass
+        case .weatherChild: return .animeWeather
+        case .yourName: return .animeStars
+        case .demonBlade: return .animeBlade
+        case .natsumeBook: return .animeForest
         case .futureTech: return .future
         case .cartoonPop: return .cartoon
         case .ancientInk: return .heritage
@@ -852,6 +1016,36 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     func symbol(_ role: ThemeSymbolRole) -> String {
         switch (self, role) {
+        case (.weatherChild, .theme): return "cloud.sun.rain"
+        case (.weatherChild, .calendar): return "sun.max"
+        case (.weatherChild, .note): return "cloud.sun.fill"
+        case (.weatherChild, .notification): return "cloud.bolt.rain"
+        case (.weatherChild, .task): return "checkmark.seal.fill"
+        case (.weatherChild, .mood): return "sun.rain.fill"
+        case (.yourName, .theme): return "sparkles"
+        case (.yourName, .calendar): return "moon.stars.fill"
+        case (.yourName, .note): return "paperclip"
+        case (.yourName, .notification): return "bell.badge.fill"
+        case (.yourName, .task): return "checkmark.circle.fill"
+        case (.yourName, .mood): return "star.fill"
+        case (.demonBlade, .theme): return "flame"
+        case (.demonBlade, .calendar): return "wind"
+        case (.demonBlade, .note): return "waveform.path.ecg"
+        case (.demonBlade, .notification): return "bell.and.waves.left.and.right"
+        case (.demonBlade, .task): return "bolt.circle.fill"
+        case (.demonBlade, .mood): return "flame.fill"
+        case (.natsumeBook, .theme): return "leaf"
+        case (.natsumeBook, .calendar): return "book.closed"
+        case (.natsumeBook, .note): return "text.book.closed.fill"
+        case (.natsumeBook, .notification): return "bell"
+        case (.natsumeBook, .task): return "checkmark.seal"
+        case (.natsumeBook, .mood): return "cat.fill"
+        case (.ios27Glass, .theme): return "sparkles.rectangle.stack"
+        case (.ios27Glass, .calendar): return "calendar.badge.clock"
+        case (.ios27Glass, .note): return "capsule.portrait"
+        case (.ios27Glass, .notification): return "bell.and.waves.left.and.right"
+        case (.ios27Glass, .task): return "checkmark.circle.fill"
+        case (.ios27Glass, .mood): return "drop.degreesign.fill"
         case (.futureTech, .theme): return "cpu"
         case (.futureTech, .calendar): return "calendar.badge.clock"
         case (.futureTech, .note): return "doc.text.magnifyingglass"
@@ -885,6 +1079,11 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
 enum ThemeBackgroundStyle {
     case neon
+    case liquidGlass
+    case animeWeather
+    case animeStars
+    case animeBlade
+    case animeForest
     case future
     case cartoon
     case heritage
@@ -920,11 +1119,13 @@ struct GlassPanel: ViewModifier {
             .background(
                 ZStack {
                     RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(theme.palette.card)
+                        .fill(theme.backgroundStyle == .liquidGlass ? Color.white.opacity(0.16) : theme.palette.card)
                     RoundedRectangle(cornerRadius: radius, style: .continuous)
                         .fill(
                             LinearGradient(
-                                colors: [Color.white.opacity(0.12), Color.white.opacity(0.035)],
+                                colors: theme.backgroundStyle == .liquidGlass ?
+                                    [Color.white.opacity(0.24), theme.palette.accent.opacity(0.07), Color.white.opacity(0.05)] :
+                                    [Color.white.opacity(0.12), Color.white.opacity(0.035)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -933,9 +1134,9 @@ struct GlassPanel: ViewModifier {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .stroke(isActive ? theme.palette.cyan.opacity(0.78) : theme.palette.line, lineWidth: isActive ? 1.4 : 1)
+                    .stroke(isActive ? theme.palette.cyan.opacity(0.78) : (theme.backgroundStyle == .liquidGlass ? Color.white.opacity(0.22) : theme.palette.line), lineWidth: isActive ? 1.4 : 1)
             )
-            .shadow(color: isActive ? theme.palette.cyan.opacity(0.22) : Color.black.opacity(0.24), radius: isActive ? 20 : 14, x: 0, y: 9)
+            .shadow(color: isActive ? theme.palette.cyan.opacity(0.22) : Color.black.opacity(theme.backgroundStyle == .liquidGlass ? 0.16 : 0.24), radius: isActive ? 20 : 14, x: 0, y: 9)
     }
 }
 
@@ -997,6 +1198,7 @@ struct AnimatedGlowBackground: View {
                 startPoint: animate ? .bottomTrailing : .bottomLeading,
                 endPoint: .topTrailing
             )
+            ThemeBackgroundIllustration(theme: theme, animate: animate)
             themeDecoration
         }
         .ignoresSafeArea()
@@ -1010,6 +1212,31 @@ struct AnimatedGlowBackground: View {
     @ViewBuilder
     private var themeDecoration: some View {
         switch theme.backgroundStyle {
+        case .liquidGlass:
+            ZStack {
+                ForEach(0..<7, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 90, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.10),
+                                    theme.palette.accent.opacity(0.08),
+                                    theme.palette.warm.opacity(0.07)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 90, style: .continuous)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                        .frame(width: CGFloat(190 + index * 86), height: CGFloat(126 + index * 48))
+                        .blur(radius: CGFloat(index % 2) * 0.8)
+                        .rotationEffect(.degrees(Double(index) * 10 + (animate ? 5 : -5)))
+                        .offset(x: CGFloat(index * 52 - 210), y: CGFloat(index * 28 - 120))
+                }
+            }
         case .future:
             VStack(spacing: 26) {
                 ForEach(0..<16, id: \.self) { _ in
@@ -1030,6 +1257,74 @@ struct AnimatedGlowBackground: View {
                         .offset(x: CGFloat((index % 4) * 150 - 260), y: CGFloat((index / 2) * 110 - 220) + (animate ? 16 : -16))
                 }
             }
+        case .animeWeather:
+            ZStack {
+                RadialGradient(colors: [theme.palette.warm.opacity(0.22), .clear], center: .topTrailing, startRadius: 10, endRadius: 440)
+                ForEach(0..<8, id: \.self) { index in
+                    Image(systemName: index % 3 == 0 ? "cloud.fill" : "drop.fill")
+                        .font(.system(size: CGFloat(index % 3 == 0 ? 54 : 20), weight: .semibold))
+                        .foregroundStyle((index % 3 == 0 ? Color.white : theme.palette.accent).opacity(index % 3 == 0 ? 0.10 : 0.20))
+                        .offset(x: CGFloat(index * 128 - 450) + (animate ? 22 : -22), y: CGFloat((index % 4) * 92 - 210) + (animate ? -12 : 12))
+                }
+                ForEach(0..<5, id: \.self) { index in
+                    Capsule()
+                        .fill(theme.palette.accent.opacity(0.10))
+                        .frame(width: 120, height: 2)
+                        .rotationEffect(.degrees(-18))
+                        .offset(x: CGFloat(index * 170 - 360), y: CGFloat(index * 54 - 120) + (animate ? 24 : -24))
+                }
+            }
+        case .animeStars:
+            ZStack {
+                ForEach(0..<18, id: \.self) { index in
+                    Image(systemName: index % 4 == 0 ? "sparkle" : "star.fill")
+                        .font(.system(size: CGFloat(10 + (index % 5) * 4), weight: .semibold))
+                        .foregroundStyle((index % 3 == 0 ? theme.palette.warm : theme.palette.accent).opacity(0.18))
+                        .offset(x: CGFloat((index * 91) % 780 - 390), y: CGFloat((index * 57) % 520 - 260) + (animate ? 10 : -10))
+                        .scaleEffect(animate ? 1.10 : 0.86)
+                }
+                ForEach(0..<4, id: \.self) { index in
+                    Capsule()
+                        .fill(LinearGradient(colors: [.clear, theme.palette.warm.opacity(0.22), .clear], startPoint: .leading, endPoint: .trailing))
+                        .frame(width: 260, height: 2)
+                        .rotationEffect(.degrees(-28))
+                        .offset(x: CGFloat(index * 180 - 280) + (animate ? 28 : -28), y: CGFloat(index * 84 - 170))
+                }
+            }
+        case .animeBlade:
+            ZStack {
+                ForEach(0..<8, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill((index % 2 == 0 ? theme.palette.accent : theme.palette.accent2).opacity(0.12))
+                        .frame(width: CGFloat(330 + index * 28), height: 8)
+                        .rotationEffect(.degrees(index % 2 == 0 ? -34 : 32))
+                        .offset(x: CGFloat(index * 52 - 210), y: CGFloat(index * 62 - 220) + (animate ? 16 : -16))
+                }
+                ForEach(0..<5, id: \.self) { index in
+                    Image(systemName: index % 2 == 0 ? "flame.fill" : "wind")
+                        .font(.system(size: CGFloat(34 + index * 8), weight: .bold))
+                        .foregroundStyle((index % 2 == 0 ? theme.palette.accent2 : theme.palette.accent).opacity(0.13))
+                        .rotationEffect(.degrees(animate ? 8 : -8))
+                        .offset(x: CGFloat(index * 145 - 280), y: CGFloat((index % 3) * 120 - 160))
+                }
+            }
+        case .animeForest:
+            ZStack {
+                RadialGradient(colors: [theme.palette.warm.opacity(0.14), .clear], center: .bottomLeading, startRadius: 20, endRadius: 520)
+                ForEach(0..<12, id: \.self) { index in
+                    Image(systemName: index % 4 == 0 ? "book.closed.fill" : "leaf.fill")
+                        .font(.system(size: CGFloat(18 + (index % 5) * 8), weight: .semibold))
+                        .foregroundStyle((index % 4 == 0 ? theme.palette.warm : theme.palette.accent).opacity(0.14))
+                        .rotationEffect(.degrees(Double(index * 23) + (animate ? 8 : -8)))
+                        .offset(x: CGFloat((index * 87) % 760 - 380), y: CGFloat((index * 69) % 520 - 260) + (animate ? 14 : -14))
+                }
+                ForEach(0..<4, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 90, style: .continuous)
+                        .stroke(theme.palette.warm.opacity(0.07), lineWidth: 1)
+                        .frame(width: CGFloat(220 + index * 110), height: CGFloat(150 + index * 64))
+                        .rotationEffect(.degrees(Double(index * 11) + (animate ? 4 : -4)))
+                }
+            }
         case .heritage:
             ZStack {
                 RadialGradient(colors: [theme.palette.warm.opacity(0.16), .clear], center: .center, startRadius: 20, endRadius: 520)
@@ -1046,6 +1341,198 @@ struct AnimatedGlowBackground: View {
     }
 }
 
+struct ThemeBackgroundIllustration: View {
+    let theme: AppTheme
+    let animate: Bool
+
+    var body: some View {
+        ZStack {
+            Image(systemName: theme.illustrationSymbol)
+                .font(.system(size: 210, weight: .ultraLight))
+                .foregroundStyle(theme.palette.accent.opacity(0.08))
+                .rotationEffect(.degrees(animate ? 8 : -8))
+                .offset(x: 330, y: 210)
+            Image(systemName: theme.symbol(.mood))
+                .font(.system(size: 150, weight: .light))
+                .foregroundStyle(theme.palette.warm.opacity(0.07))
+                .rotationEffect(.degrees(animate ? -10 : 10))
+                .offset(x: -360, y: -220)
+        }
+        .blur(radius: 0.2)
+    }
+}
+
+struct MenuBarQuickPanel: View {
+    @EnvironmentObject private var store: ReminderStore
+    @EnvironmentObject private var noteStore: NoteStore
+    @Environment(\.appTheme) private var theme
+    @State private var inspirationDraft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack(spacing: 10) {
+                CartoonPersonBadge(progress: inspirationProgress, compact: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("今日灵感胶囊")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    Text(inspirationMessage)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(inspirationDraft.count >= inspirationCharacterLimit ? theme.palette.warm : theme.palette.cyan)
+                }
+                Spacer()
+                Button {
+                    openMainWindow()
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("打开小Ding助手")
+            }
+
+            InspirationInsightRow(analysis: InspirationAnalyzer.analyze(inspirationDraft), compact: true)
+
+            ZStack(alignment: .topLeading) {
+                if inspirationDraft.isEmpty {
+                    Text("快来记录今日灵感吧，在这里，你可以畅所欲言。")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.palette.muted.opacity(0.58))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                }
+                TextEditor(text: $inspirationDraft)
+                    .font(.system(size: 14))
+                    .foregroundStyle(theme.palette.text)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.clear)
+                    .frame(height: 112)
+                    .onChange(of: inspirationDraft) { value in
+                        let limited = String(value.prefix(inspirationCharacterLimit))
+                        if limited != value {
+                            inspirationDraft = limited
+                        }
+                        noteStore.setNote(limited, for: Date())
+                    }
+            }
+            .padding(8)
+            .background(theme.palette.ink.opacity(0.28), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(theme.palette.line, lineWidth: 1)
+            )
+
+            InspirationProgressBar(progress: inspirationProgress)
+
+            Divider().opacity(0.28)
+
+            HStack(spacing: 10) {
+                Button {
+                    startRestMode()
+                } label: {
+                    Label("休鼾模式", systemImage: "moon.zzz.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .noWrap()
+                }
+                .buttonStyle(PrimaryButtonStyle())
+
+                Button {
+                    openMainWindow()
+                } label: {
+                    Label("打开主页面", systemImage: "arrow.up.forward.app")
+                        .font(.system(size: 12, weight: .bold))
+                        .noWrap()
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label("今日待办", systemImage: "checklist")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(theme.palette.muted)
+                    .noWrap()
+            if todayItems.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "cup.and.saucer.fill")
+                        .foregroundStyle(theme.palette.warm)
+                    Text("今天还没有待办，先留一点呼吸感。")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                }
+                .padding(.vertical, 8)
+            } else {
+                VStack(spacing: 8) {
+                        ForEach(todayItems.prefix(4)) { item in
+                        Button {
+                            openMainWindow()
+                        } label: {
+                            HStack(spacing: 9) {
+                                Image(systemName: item.isDone ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(item.isDone ? theme.palette.accent : theme.palette.muted)
+                                Text(item.title)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(item.isDone ? theme.palette.muted : theme.palette.text)
+                                    .strikethrough(item.isDone)
+                                    .noWrap(scale: 0.74)
+                                Spacer()
+                                Text(timeText(item))
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(theme.palette.cyan)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(theme.palette.cardStrong, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            }
+        }
+        .padding(16)
+        .frame(width: 372)
+        .background(
+            LinearGradient(colors: [theme.palette.ink, theme.palette.plum], startPoint: .topLeading, endPoint: .bottomTrailing)
+        )
+        .onAppear {
+            inspirationDraft = noteStore.note(for: Date())
+        }
+    }
+
+    private var todayItems: [ReminderItem] {
+        store.items(on: Date())
+    }
+
+    private var summaryText: String {
+        let undone = todayItems.filter { !$0.isDone }.count
+        return undone == 0 ? "没有未完成事项" : "\(undone) 项待处理"
+    }
+
+    private var inspirationProgress: Double {
+        min(Double(inspirationDraft.count) / Double(inspirationCharacterLimit), 1.0)
+    }
+
+    private var inspirationMessage: String {
+        inspirationDraft.count >= inspirationCharacterLimit ? "很棒，今日灵感爆棚" : "灵感蓄力中 \(Int(inspirationProgress * 100))% · \(inspirationDraft.count)/\(inspirationCharacterLimit)"
+    }
+
+    private func openMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+    }
+
+    private func startRestMode() {
+        RestWindowManager.shared.show(theme: theme) {
+            RestWindowManager.shared.close()
+        }
+    }
+
+    private func timeText(_ item: ReminderItem) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: item.remindAt)
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var store: ReminderStore
     @EnvironmentObject private var iconManager: AppIconManager
@@ -1054,6 +1541,10 @@ struct ContentView: View {
     @State private var showingEditor = false
     @State private var editingItem: ReminderItem?
     @State private var showingIconSettings = false
+    @State private var showingRestMode = false
+    @State private var showingDailyGreeting = false
+    @State private var greeting = EmotionalCopy.greetings.randomElement() ?? EmotionalCopy.greetings[0]
+    @AppStorage("lastDailyGreetingDate") private var lastDailyGreetingDate = ""
 
     var body: some View {
         GeometryReader { proxy in
@@ -1071,7 +1562,7 @@ struct ContentView: View {
                     Rectangle()
                         .fill(theme.palette.line)
                         .frame(width: 1)
-                    DayDetail(selectedDate: $selectedDate, showingEditor: $showingEditor, editingItem: $editingItem, compact: compact)
+                    DayDetail(selectedDate: $selectedDate, showingEditor: $showingEditor, editingItem: $editingItem, showingRestMode: $showingRestMode, compact: compact)
                         .frame(minWidth: 0, maxWidth: .infinity)
                 }
                 .padding(innerPadding)
@@ -1089,6 +1580,14 @@ struct ContentView: View {
                 .padding(.bottom, outerPadding + 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .help("启动图标设置")
+
+                if showingDailyGreeting {
+                    DailyOpeningOverlay(copy: greeting) {
+                        closeGreeting()
+                    }
+                    .padding(outerPadding + 22)
+                    .transition(.scale(scale: 0.94).combined(with: .opacity))
+                }
             }
             .environment(\.appTheme, theme)
         }
@@ -1098,6 +1597,7 @@ struct ContentView: View {
         .onAppear {
             NotificationScheduler.shared.reschedule(items: store.items)
             iconManager.applySavedIcon()
+            showDailyGreetingIfNeeded()
         }
         .sheet(isPresented: $showingEditor) {
             ReminderEditor(item: editingItem, selectedDate: selectedDate) { item in
@@ -1117,6 +1617,38 @@ struct ContentView: View {
         }
         .onChange(of: showingEditor) { isShowing in
             if !isShowing { editingItem = nil }
+        }
+        .onChange(of: showingRestMode) { isShowing in
+            if isShowing {
+                RestWindowManager.shared.show(theme: currentTheme) {
+                    showingRestMode = false
+                }
+            } else {
+                RestWindowManager.shared.close()
+            }
+        }
+    }
+
+    private var currentTheme: AppTheme {
+        AppTheme(rawValue: selectedThemeRaw) ?? .ancientInk
+    }
+
+    private func showDailyGreetingIfNeeded() {
+        let today = DateKey.string(from: Date())
+        guard lastDailyGreetingDate != today else { return }
+        greeting = EmotionalCopy.greetings.randomElement() ?? greeting
+        lastDailyGreetingDate = today
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            showingDailyGreeting = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            closeGreeting()
+        }
+    }
+
+    private func closeGreeting() {
+        withAnimation(.easeOut(duration: 0.22)) {
+            showingDailyGreeting = false
         }
     }
 }
@@ -1167,7 +1699,7 @@ struct Sidebar: View {
                         .noWrap()
                     StatRow(title: "今天", value: "\(store.count(on: Date())) 项")
                     StatRow(title: "选中日期", value: "\(store.count(on: selectedDate)) 项")
-                    StatRow(title: "记事", value: noteStore.hasNote(on: selectedDate) ? "已记录" : "空")
+                    StatRow(title: "灵感", value: noteStore.hasNote(on: selectedDate) ? "已记录" : "空")
                     StatRow(title: "未完成", value: "\(store.items.filter { !$0.isDone }.count) 项")
                 }
                 .padding(16)
@@ -1198,11 +1730,11 @@ struct CalendarPanel: View {
     @Binding var selectedDate: Date
     @Binding var visibleMonth: Date
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 7)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 5), count: 7)
     private let weekdaySymbols = ["日", "一", "二", "三", "四", "五", "六"]
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 9) {
             HStack {
                 Button {
                     moveMonth(-1)
@@ -1224,12 +1756,12 @@ struct CalendarPanel: View {
                 .buttonStyle(IconButtonStyle())
             }
 
-            LazyVGrid(columns: columns, spacing: 8) {
+            LazyVGrid(columns: columns, spacing: 5) {
                 ForEach(weekdaySymbols, id: \.self) { symbol in
                     Text(symbol)
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(theme.palette.muted)
-                        .frame(height: 22)
+                        .frame(height: 18)
                 }
                 ForEach(days, id: \.self) { day in
                     CalendarDayCell(
@@ -1243,12 +1775,12 @@ struct CalendarPanel: View {
             }
             HStack(spacing: 12) {
                 CalendarLegendDot(color: theme.palette.cyan, text: "事项")
-                CalendarLegendDot(color: theme.palette.warm, text: "记事")
+                CalendarLegendDot(color: theme.palette.warm, text: "灵感")
                 Spacer(minLength: 0)
             }
         }
-        .padding(16)
-        .glassPanel(radius: 22)
+        .padding(12)
+        .glassPanel(radius: 18)
         .hoverLift()
     }
 
@@ -1263,8 +1795,10 @@ struct CalendarPanel: View {
         let calendar = Calendar.current
         let interval = calendar.dateInterval(of: .month, for: visibleMonth)!
         let firstWeekday = calendar.component(.weekday, from: interval.start)
+        let range = calendar.range(of: .day, in: .month, for: interval.start)!
         let startOffset = 1 - firstWeekday
-        return (0..<42).compactMap { calendar.date(byAdding: .day, value: startOffset + $0, to: interval.start) }
+        let totalCells = Int(ceil(Double(firstWeekday - 1 + range.count) / 7.0)) * 7
+        return (0..<totalCells).compactMap { calendar.date(byAdding: .day, value: startOffset + $0, to: interval.start) }
     }
 
     private func moveMonth(_ value: Int) {
@@ -1387,13 +1921,9 @@ struct MoodNote: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: theme.symbol(.mood))
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(theme.palette.warm)
-                .frame(width: 30, height: 30)
-                .background(theme.palette.warm.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            ThemeMiniIllustration(symbol: theme.illustrationSymbol, size: 38)
             VStack(alignment: .leading, spacing: 5) {
-                Text("今日小能量")
+                Text(themeName.toneLine)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(theme.palette.text)
                     .noWrap()
@@ -1408,6 +1938,239 @@ struct MoodNote: View {
         .padding(14)
         .glassPanel(radius: 18)
         .hoverLift()
+    }
+}
+
+struct ThemeMiniIllustration: View {
+    @Environment(\.appTheme) private var theme
+    let symbol: String
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [theme.palette.accent.opacity(0.24), theme.palette.warm.opacity(0.16)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            Image(systemName: symbol)
+                .font(.system(size: size * 0.48, weight: .semibold))
+                .foregroundStyle(theme.palette.warm)
+        }
+        .frame(width: size, height: size)
+        .overlay(
+            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+        )
+    }
+}
+
+struct CartoonPersonBadge: View {
+    @Environment(\.appTheme) private var theme
+    let progress: Double
+    let compact: Bool
+
+    var body: some View {
+        let size: CGFloat = compact ? 44 : 58
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.30, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [theme.palette.warm.opacity(0.22), theme.palette.accent.opacity(0.22)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            Circle()
+                .fill(theme.palette.warm.opacity(0.95))
+                .frame(width: size * 0.34, height: size * 0.34)
+                .offset(y: -size * 0.13)
+            RoundedRectangle(cornerRadius: size * 0.16, style: .continuous)
+                .fill(theme.palette.accent.opacity(0.92))
+                .frame(width: size * 0.48, height: size * 0.28)
+                .offset(y: size * 0.18)
+            HStack(spacing: size * 0.07) {
+                Circle().fill(Color.white.opacity(0.90)).frame(width: size * 0.045, height: size * 0.045)
+                Circle().fill(Color.white.opacity(0.90)).frame(width: size * 0.045, height: size * 0.045)
+            }
+            .offset(y: -size * 0.16)
+            Image(systemName: progress >= 1 ? "sparkles" : "bolt.fill")
+                .font(.system(size: size * 0.20, weight: .bold))
+                .foregroundStyle(Color.white)
+                .offset(x: size * 0.24, y: -size * 0.25)
+        }
+        .frame(width: size, height: size)
+        .overlay(
+            RoundedRectangle(cornerRadius: size * 0.30, style: .continuous)
+                .stroke(theme.palette.warm.opacity(progress >= 1 ? 0.86 : 0.38), lineWidth: progress >= 1 ? 1.8 : 1)
+        )
+        .shadow(color: theme.palette.warm.opacity(progress >= 1 ? 0.32 : 0.12), radius: 16, x: 0, y: 8)
+        .animation(.spring(response: 0.28, dampingFraction: 0.78), value: progress)
+    }
+}
+
+struct InspirationProgressBar: View {
+    @Environment(\.appTheme) private var theme
+    let progress: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(progress >= 1 ? "很棒，今日灵感爆棚" : "灵感蓄力中")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(progress >= 1 ? theme.palette.warm : theme.palette.cyan)
+                Spacer()
+                Text("\(Int(progress * 100))%")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+            }
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(theme.palette.cardStrong)
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [theme.palette.accent, theme.palette.warm],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(8, proxy.size.width * progress))
+                }
+            }
+            .frame(height: 7)
+        }
+    }
+}
+
+struct InspirationAnalysis {
+    let keywords: [String]
+    let mood: String
+    let moodSymbol: String
+}
+
+enum InspirationAnalyzer {
+    private static let keywordCandidates = [
+        "会议", "客户", "需求", "项目", "版本", "发布", "沟通", "排期", "复盘", "工作",
+        "页面", "视觉", "主题", "图标", "动效", "交互", "文案", "风格", "设计", "体验",
+        "代码", "开发", "修复", "测试", "打包", "功能", "逻辑", "优化", "问题", "上线",
+        "生活", "吃饭", "散步", "朋友", "天气", "电影", "音乐", "路上", "家庭", "旅行",
+        "休息", "睡眠", "放松", "呼吸", "疲惫", "安静", "慢慢", "运动", "阅读", "喝水",
+        "重要", "记得", "提醒", "截止", "明天", "今天", "计划", "目标", "待办", "总结",
+        "开心", "焦虑", "期待", "难过", "平静", "压力", "喜欢", "感谢", "顺利", "卡住",
+        "想法", "灵感", "创意", "脑洞", "尝试", "画面", "记录", "学习", "成长", "完成"
+    ]
+
+    private static let moodRules: [(String, String, [String])] = [
+        ("晴朗", "sun.max.fill", ["开心", "快乐", "顺利", "喜欢", "感谢", "完成", "期待", "舒服", "棒"]),
+        ("绷紧", "bolt.heart.fill", ["焦虑", "压力", "紧张", "烦", "崩溃", "赶", "ddl", "困难", "卡住"]),
+        ("松弛", "leaf.fill", ["平静", "放松", "安静", "休息", "睡眠", "散步", "慢慢", "呼吸"]),
+        ("专注", "scope", ["工作", "会议", "需求", "代码", "测试", "项目", "发布", "计划"]),
+        ("灵感", "sparkles", ["灵感", "创意", "想法", "设计", "画面", "主题", "文案", "优化"])
+    ]
+
+    static func analyze(_ text: String) -> InspirationAnalysis {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keywords = extractKeywords(from: cleaned)
+
+        let moodScores: [(String, String, Int)] = moodRules.map { rule in
+            let score = rule.2.reduce(0) { partial, token in
+                partial + (cleaned.localizedCaseInsensitiveContains(token) ? 1 : 0)
+            }
+            return (rule.0, rule.1, score)
+        }
+        let selectedMood = moodScores.sorted {
+            if $0.2 == $1.2 { return $0.0 < $1.0 }
+            return $0.2 > $1.2
+        }.first
+
+        if let selectedMood, selectedMood.2 > 0 {
+            return InspirationAnalysis(keywords: keywords, mood: selectedMood.0, moodSymbol: selectedMood.1)
+        }
+        return InspirationAnalysis(keywords: keywords, mood: cleaned.isEmpty ? "待唤醒" : "平稳", moodSymbol: cleaned.isEmpty ? "moon.stars.fill" : "heart.text.square.fill")
+    }
+
+    private static func extractKeywords(from text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+
+        var collected: [String] = []
+        for candidate in keywordCandidates where text.localizedCaseInsensitiveContains(candidate) {
+            appendKeyword(candidate, to: &collected)
+            if collected.count == 4 { return collected }
+        }
+
+        let separators = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(CharacterSet(charactersIn: "，。！？、；：,.!?;:（）()【】[]《》<>“”\"'"))
+        let fragments = text
+            .components(separatedBy: separators)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.count >= 2 }
+
+        for fragment in fragments {
+            appendKeyword(fragment, to: &collected)
+            if collected.count == 4 { break }
+        }
+
+        return collected
+    }
+
+    private static func appendKeyword(_ keyword: String, to keywords: inout [String]) {
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let shortKeyword = String(trimmed.prefix(6))
+        guard !keywords.contains(shortKeyword) else { return }
+        keywords.append(shortKeyword)
+    }
+}
+
+struct InspirationInsightRow: View {
+    @Environment(\.appTheme) private var theme
+    let analysis: InspirationAnalysis
+    let compact: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !analysis.keywords.isEmpty {
+                HStack(spacing: 7) {
+                    ForEach(analysis.keywords, id: \.self) { keyword in
+                        Text(keyword)
+                            .font(.system(size: compact ? 10 : 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.70)
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, compact ? 7 : 9)
+                            .padding(.vertical, compact ? 6 : 7)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(theme.palette.accent.opacity(0.15))
+                            )
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .stroke(theme.palette.accent.opacity(0.24), lineWidth: 1)
+                            )
+                    }
+                }
+            }
+
+            Label("今日心情：\(analysis.mood)", systemImage: analysis.moodSymbol)
+                .font(.system(size: compact ? 11 : 12, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.palette.warm)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(theme.palette.warm.opacity(0.12), in: Capsule(style: .continuous))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(theme.palette.warm.opacity(0.20), lineWidth: 1)
+                )
+                .noWrap(scale: 0.72)
+        }
+        .animation(.easeInOut(duration: 0.18), value: analysis.keywords.joined(separator: "|") + analysis.mood)
     }
 }
 
@@ -1682,7 +2445,7 @@ struct CalendarDayCell: View {
                         .frame(height: 5)
                     }
                     .foregroundStyle(theme.palette.text)
-                    .frame(height: 38)
+                    .frame(height: 32)
                     .frame(maxWidth: .infinity)
                     .background(
                         isSelected ?
@@ -1699,7 +2462,7 @@ struct CalendarDayCell: View {
                 .hoverLift()
             } else {
                 Color.clear
-                    .frame(height: 38)
+                    .frame(height: 32)
                     .frame(maxWidth: .infinity)
             }
         }
@@ -1778,6 +2541,282 @@ struct WeatherCard: View {
     }
 }
 
+struct RestStartCard: View {
+    @Environment(\.appTheme) private var theme
+    let compact: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: "moon.zzz.fill")
+                    .font(.system(size: compact ? 15 : 17, weight: .semibold))
+                    .foregroundStyle(theme.palette.warm)
+                    .frame(width: compact ? 28 : 32, height: compact ? 28 : 32)
+                    .background(theme.palette.warm.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("休鼾一下")
+                        .font(.system(size: compact ? 12 : 13, weight: .bold))
+                        .foregroundStyle(theme.palette.text)
+                        .noWrap(scale: 0.7)
+                    Text("5分钟")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(theme.palette.muted)
+                        .noWrap(scale: 0.7)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, compact ? 9 : 11)
+            .padding(.vertical, compact ? 8 : 10)
+            .glassPanel(radius: 16, active: true)
+        }
+        .buttonStyle(.plain)
+        .hoverLift()
+    }
+}
+
+struct RestModeView: View {
+    @Environment(\.appTheme) private var theme
+    @State private var remaining = 300
+    @State private var animate = false
+    @State private var copy = EmotionalCopy.restLines.randomElement() ?? EmotionalCopy.restLines[0]
+    let onExit: () -> Void
+
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    theme.palette.ink.opacity(0.98),
+                    theme.palette.surface.opacity(0.96),
+                    theme.palette.accent2.opacity(0.35)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            RestWallpaper(theme: theme, animate: animate)
+            VStack(spacing: 26) {
+                Spacer()
+                Image(systemName: copy.symbol)
+                    .font(.system(size: 74, weight: .light))
+                    .foregroundStyle(theme.palette.warm)
+                    .shadow(color: theme.palette.warm.opacity(0.36), radius: 28)
+                    .scaleEffect(animate ? 1.06 : 0.96)
+                Text(copy.title)
+                    .font(.system(size: 44, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                    .noWrap(scale: 0.7)
+                Text(copy.message)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(6)
+                    .frame(maxWidth: 620)
+                Text(timeText)
+                    .font(.system(size: 74, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.palette.text)
+                Button {
+                    onExit()
+                } label: {
+                    Label("退出休鼾", systemImage: "xmark.circle.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .noWrap()
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .frame(width: 150)
+                Spacer()
+            }
+            .padding(42)
+        }
+        .ignoresSafeArea()
+        .onAppear {
+            withAnimation(.easeInOut(duration: 5).repeatForever(autoreverses: true)) {
+                animate = true
+            }
+        }
+        .onReceive(timer) { _ in
+            if remaining <= 1 {
+                onExit()
+            } else {
+                remaining -= 1
+            }
+        }
+    }
+
+    private var timeText: String {
+        "\(remaining / 60):\(String(format: "%02d", remaining % 60))"
+    }
+}
+
+final class RestWindowManager {
+    static let shared = RestWindowManager()
+    private var window: NSWindow?
+    private var isClosing = false
+
+    func show(theme: AppTheme, onClose: @escaping () -> Void) {
+        hideRestWindow()
+        let frame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let content = RestModeView {
+            onClose()
+        }
+        .environment(\.appTheme, theme)
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "休鼾一下"
+        window.contentView = NSHostingView(rootView: content)
+        window.level = .screenSaver
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isOpaque = true
+        window.backgroundColor = .black
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.window = window
+    }
+
+    func close() {
+        guard !isClosing else { return }
+        isClosing = true
+        hideRestWindow()
+        restoreMainWindow()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            self.isClosing = false
+        }
+    }
+
+    private func hideRestWindow() {
+        window?.orderOut(nil)
+        window?.contentView = nil
+        window = nil
+    }
+
+    private func restoreMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let mainWindow = NSApplication.shared.windows.first(where: { $0.title == "小Ding助手" }) {
+            mainWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        NSApplication.shared.windows.first(where: { $0.title != "休鼾一下" })?.makeKeyAndOrderFront(nil)
+    }
+}
+
+struct RestWallpaper: View {
+    let theme: AppTheme
+    let animate: Bool
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<8, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 120, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [theme.palette.accent.opacity(0.12), theme.palette.warm.opacity(0.10), .clear],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: CGFloat(1 + index % 3)
+                    )
+                    .frame(width: CGFloat(260 + index * 120), height: CGFloat(130 + index * 70))
+                    .rotationEffect(.degrees(Double(index * 11) + (animate ? 8 : -8)))
+                    .offset(x: animate ? CGFloat(index * 9 - 30) : CGFloat(30 - index * 8), y: CGFloat(index * 10 - 45))
+            }
+            Circle()
+                .fill(theme.palette.accent.opacity(0.18))
+                .frame(width: 420, height: 420)
+                .blur(radius: 90)
+                .offset(x: animate ? -260 : -180, y: animate ? -180 : -260)
+            Circle()
+                .fill(theme.palette.warm.opacity(0.16))
+                .frame(width: 520, height: 520)
+                .blur(radius: 100)
+                .offset(x: animate ? 300 : 220, y: animate ? 210 : 280)
+        }
+    }
+}
+
+struct DailyOpeningOverlay: View {
+    @Environment(\.appTheme) private var theme
+    let copy: EmotionalCopy
+    let onClose: () -> Void
+    @State private var remaining = 5
+    @State private var animate = false
+
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.34)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onClose)
+
+            VStack(spacing: 20) {
+                HStack {
+                    ThemeMiniIllustration(symbol: copy.symbol, size: 56)
+                        .scaleEffect(animate ? 1.05 : 0.96)
+                    Spacer()
+                    Button {
+                        onClose()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(IconButtonStyle())
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(copy.title)
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                        .noWrap(scale: 0.72)
+                    Text(copy.message)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                        .lineSpacing(5)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack {
+                    Text("自动关闭 \(remaining)s")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(theme.palette.cyan)
+                    Spacer()
+                    Button("开始今天") {
+                        onClose()
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .frame(width: 118)
+                }
+            }
+            .padding(26)
+            .frame(width: 460)
+            .glassPanel(radius: 26, active: true)
+            .overlay(
+                Image(systemName: theme.illustrationSymbol)
+                    .font(.system(size: 120, weight: .ultraLight))
+                    .foregroundStyle(theme.palette.accent.opacity(0.08))
+                    .offset(x: 150, y: 74)
+            )
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+                animate = true
+            }
+        }
+        .onReceive(timer) { _ in
+            if remaining <= 1 {
+                onClose()
+            } else {
+                remaining -= 1
+            }
+        }
+    }
+}
+
 struct DayDetail: View {
     @EnvironmentObject private var store: ReminderStore
     @EnvironmentObject private var noteStore: NoteStore
@@ -1786,6 +2825,7 @@ struct DayDetail: View {
     @Binding var selectedDate: Date
     @Binding var showingEditor: Bool
     @Binding var editingItem: ReminderItem?
+    @Binding var showingRestMode: Bool
     let compact: Bool
     @State private var toastMessage: String?
 
@@ -1798,13 +2838,17 @@ struct DayDetail: View {
                             .font(.system(size: compact ? 28 : 34, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.palette.text)
                             .noWrap(scale: 0.72)
-                        Text("事项提醒与当天记事都会保存在本机。")
+                        Text("事项提醒与今日灵感胶囊都会保存在本机。")
                             .font(.system(size: 13))
                             .foregroundStyle(theme.palette.muted)
                             .noWrap(scale: 0.7)
                     }
                     .layoutPriority(1)
                     Spacer()
+                    RestStartCard(compact: compact) {
+                        showingRestMode = true
+                    }
+                    .frame(width: compact ? 126 : 150)
                     Button {
                         selectedDate = Date()
                     } label: {
@@ -1909,14 +2953,15 @@ struct NotebookPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
+                CartoonPersonBadge(progress: inspirationProgress, compact: compact)
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("当天记事本", systemImage: theme.symbol(.note))
+                    Label("今日灵感胶囊", systemImage: theme.symbol(.note))
                         .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.palette.text)
                         .noWrap()
-                    Text("像备忘录一样记录想法、会议要点、临时信息。")
+                    Text(inspirationMessage)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(theme.palette.muted)
+                        .foregroundStyle(draft.count >= inspirationCharacterLimit ? theme.palette.warm : theme.palette.cyan)
                         .noWrap(scale: 0.72)
                 }
                 Spacer()
@@ -1943,9 +2988,13 @@ struct NotebookPanel: View {
                 .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.48 : 1)
             }
 
+            InspirationProgressBar(progress: inspirationProgress)
+
+            InspirationInsightRow(analysis: InspirationAnalyzer.analyze(draft), compact: compact)
+
             ZStack(alignment: .topLeading) {
                 if draft.isEmpty {
-                    Text("记录今天重要的信息...")
+                    Text("快来记录今日灵感吧，在这里，你可以畅所欲言。")
                         .font(.system(size: 15))
                         .foregroundStyle(theme.palette.muted.opacity(0.58))
                         .padding(.horizontal, 14)
@@ -1958,7 +3007,11 @@ struct NotebookPanel: View {
                     .background(Color.clear)
                     .frame(minHeight: compact ? 128 : 158)
                     .onChange(of: draft) { value in
-                        noteStore.setNote(value, for: selectedDate)
+                        let limited = String(value.prefix(inspirationCharacterLimit))
+                        if limited != value {
+                            draft = limited
+                        }
+                        noteStore.setNote(limited, for: selectedDate)
                     }
             }
             .padding(8)
@@ -1978,6 +3031,14 @@ struct NotebookPanel: View {
         .onChange(of: selectedDate) { newDate in
             draft = noteStore.note(for: newDate)
         }
+    }
+
+    private var inspirationProgress: Double {
+        min(Double(draft.count) / Double(inspirationCharacterLimit), 1.0)
+    }
+
+    private var inspirationMessage: String {
+        draft.count >= inspirationCharacterLimit ? "很棒，今日灵感爆棚" : "灵感蓄力中 \(Int(inspirationProgress * 100))% · \(draft.count)/\(inspirationCharacterLimit)"
     }
 }
 
