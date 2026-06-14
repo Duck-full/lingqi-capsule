@@ -523,6 +523,95 @@ struct WeatherInfo: Equatable {
     }
 }
 
+enum ChineseCityName {
+    private static let cityMap: [String: String] = [
+        "beijing": "北京",
+        "shanghai": "上海",
+        "guangzhou": "广州",
+        "shenzhen": "深圳",
+        "hangzhou": "杭州",
+        "chengdu": "成都",
+        "wuhan": "武汉",
+        "nanjing": "南京",
+        "suzhou": "苏州",
+        "xi'an": "西安",
+        "xian": "西安",
+        "tianjin": "天津",
+        "chongqing": "重庆",
+        "qingdao": "青岛",
+        "dalian": "大连",
+        "xiamen": "厦门",
+        "fuzhou": "福州",
+        "jinan": "济南",
+        "changsha": "长沙",
+        "zhengzhou": "郑州",
+        "hong kong": "香港",
+        "macau": "澳门",
+        "macao": "澳门",
+        "taipei": "台北",
+        "san francisco": "旧金山",
+        "los angeles": "洛杉矶",
+        "new york": "纽约",
+        "seattle": "西雅图",
+        "chicago": "芝加哥",
+        "boston": "波士顿"
+    ]
+
+    static func displayName(for city: String?) -> String {
+        guard let city, !city.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "当前城市"
+        }
+        let trimmed = city.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.range(of: #"[A-Za-z]"#, options: .regularExpression) == nil {
+            return trimmed
+        }
+        return cityMap[trimmed.lowercased()] ?? "当前城市"
+    }
+}
+
+enum AppBackgroundLibrary {
+    private static let cache = NSCache<NSString, NSImage>()
+
+    static let immersiveBackgroundNames = (1...13).map {
+        String(format: "ImmersiveVistaBackground%02d", $0)
+    }
+
+    static func randomImmersiveBackgroundName() -> String {
+        immersiveBackgroundNames.randomElement() ?? "ImmersiveVistaBackground01"
+    }
+
+    static func image(named name: String) -> NSImage? {
+        let key = NSString(string: name)
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        guard let url = Bundle.main.url(forResource: name, withExtension: "jpg") else { return nil }
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        cache.setObject(image, forKey: key)
+        return image
+    }
+
+    static func weatherBackgroundName(for code: Int?) -> String {
+        guard let code else { return "ImmersiveVistaBackground05" }
+        switch code {
+        case 0:
+            return "ImmersiveVistaBackground07"
+        case 1, 2, 3:
+            return "ImmersiveVistaBackground05"
+        case 45, 48:
+            return "ImmersiveVistaBackground04"
+        case 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82:
+            return "ImmersiveVistaBackground06"
+        case 71, 73, 75, 77, 85, 86:
+            return "ImmersiveVistaBackground10"
+        case 95, 96, 99:
+            return "ImmersiveVistaBackground09"
+        default:
+            return "ImmersiveVistaBackground08"
+        }
+    }
+}
+
 final class WeatherStore: ObservableObject {
     @Published var info: WeatherInfo?
     @Published var isLoading = false
@@ -548,7 +637,7 @@ final class WeatherStore: ObservableObject {
                 return
             }
 
-            let city = location.city ?? "当前城市"
+            let city = ChineseCityName.displayName(for: location.city)
             let urlString = "https://api.open-meteo.com/v1/forecast?latitude=\(latitude)&longitude=\(longitude)&current_weather=true"
             guard let weatherURL = URL(string: urlString) else { return }
             URLSession.shared.dataTask(with: weatherURL) { data, _, _ in
@@ -1227,11 +1316,14 @@ extension EnvironmentValues {
 
 struct GlassPanel: ViewModifier {
     @Environment(\.appTheme) private var theme
+    @AppStorage("cardOpacityPercent") private var cardOpacityPercent = 20.0
+    @AppStorage("cardBlurPercent") private var cardBlurPercent = 45.0
     var radius: CGFloat = 20
     var isActive: Bool = false
 
     func body(content: Content) -> some View {
         content
+            .background(panelMaterial)
             .background(panelBackground)
             .overlay(panelBorder)
             .shadow(color: panelShadowColor, radius: panelShadowRadius, x: 0, y: 9)
@@ -1246,19 +1338,19 @@ struct GlassPanel: ViewModifier {
     }
 
     private var baseFill: Color {
-        if isImmersive { return Color.black.opacity(0.20) }
-        if isLiquid { return Color.white.opacity(0.16) }
-        return theme.palette.card
+        if isImmersive { return Color.black.opacity(userOpacity) }
+        if isLiquid { return Color.white.opacity(max(0.12, userOpacity * 0.82)) }
+        return theme.palette.card.opacity(max(0.42, userOpacity * 2.4))
     }
 
     private var gradientColors: [Color] {
         if isImmersive {
-            return [Color.white.opacity(0.18), Color.white.opacity(0.055), Color.black.opacity(0.10)]
+            return [Color.white.opacity(userOpacity * 0.9), Color.white.opacity(userOpacity * 0.28), Color.black.opacity(userOpacity * 0.45)]
         }
         if isLiquid {
-            return [Color.white.opacity(0.24), theme.palette.accent.opacity(0.07), Color.white.opacity(0.05)]
+            return [Color.white.opacity(userOpacity * 1.2), theme.palette.accent.opacity(userOpacity * 0.38), Color.white.opacity(userOpacity * 0.25)]
         }
-        return [Color.white.opacity(0.12), Color.white.opacity(0.035)]
+        return [Color.white.opacity(userOpacity * 0.62), Color.white.opacity(userOpacity * 0.22)]
     }
 
     private var inactiveStroke: Color {
@@ -1294,9 +1386,30 @@ struct GlassPanel: ViewModifier {
         }
     }
 
+    private var panelMaterial: some View {
+        VisualEffectBlur(material: materialStyle, blendingMode: .withinWindow)
+            .opacity(blurOpacity)
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .allowsHitTesting(false)
+    }
+
     private var panelBorder: some View {
         RoundedRectangle(cornerRadius: radius, style: .continuous)
             .stroke(isActive ? theme.palette.cyan.opacity(0.78) : inactiveStroke, lineWidth: isActive ? 1.4 : 1)
+    }
+
+    private var userOpacity: Double {
+        min(0.60, max(0.06, cardOpacityPercent / 100))
+    }
+
+    private var blurOpacity: Double {
+        min(0.85, max(0.0, cardBlurPercent / 100))
+    }
+
+    private var materialStyle: NSVisualEffectView.Material {
+        if isImmersive { return .hudWindow }
+        if isLiquid { return .sidebar }
+        return .popover
     }
 }
 
@@ -1313,6 +1426,32 @@ extension View {
 
     func hoverLift(_ enabled: Bool = true) -> some View {
         modifier(HoverLiftModifier(enabled: enabled))
+    }
+}
+
+struct VisualEffectBlur: NSViewRepresentable {
+    var material: NSVisualEffectView.Material
+    var blendingMode: NSVisualEffectView.BlendingMode
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = PassthroughVisualEffectView()
+        view.state = .active
+        view.material = material
+        view.blendingMode = blendingMode
+        view.wantsLayer = true
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.state = .active
+        view.material = material
+        view.blendingMode = blendingMode
+    }
+}
+
+final class PassthroughVisualEffectView: NSVisualEffectView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
     }
 }
 
@@ -1336,13 +1475,7 @@ struct AnimatedGlowBackground: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let theme: AppTheme
     @State private var animate = false
-    @State private var immersiveBackgroundName = Self.immersiveBackgroundNames.randomElement() ?? "ImmersiveVistaBackground01"
-
-    private static let immersiveBackgroundNames = [
-        "ImmersiveVistaBackground01",
-        "ImmersiveVistaBackground02",
-        "ImmersiveVistaBackground03"
-    ]
+    @State private var immersiveBackgroundName = AppBackgroundLibrary.randomImmersiveBackgroundName()
 
     var body: some View {
         let reducedEffects = reduceMotion || PerformanceTuning.prefersReducedEffects
@@ -1387,8 +1520,7 @@ struct AnimatedGlowBackground: View {
     private func immersiveSceneBackground(reducedEffects: Bool) -> some View {
         GeometryReader { proxy in
             ZStack {
-                if let url = Bundle.main.url(forResource: immersiveBackgroundName, withExtension: "jpg"),
-                   let image = NSImage(contentsOf: url) {
+                if let image = AppBackgroundLibrary.image(named: immersiveBackgroundName) {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
@@ -1783,7 +1915,6 @@ struct ContentView: View {
     @State private var showingEditor = false
     @State private var editingItem: ReminderItem?
     @State private var showingIconSettings = false
-    @State private var showingRestMode = false
     @State private var showingDailyGreeting = false
     @State private var greeting = EmotionalCopy.greetings.randomElement() ?? EmotionalCopy.greetings[0]
     @AppStorage("lastDailyGreetingDate") private var lastDailyGreetingDate = ""
@@ -1799,12 +1930,16 @@ struct ContentView: View {
             ZStack {
                 AnimatedGlowBackground(theme: theme)
                 HStack(spacing: 0) {
-                    Sidebar(selectedDate: $selectedDate, showingEditor: $showingEditor, selectedThemeRaw: $selectedThemeRaw, compact: compact)
+                    Sidebar(selectedDate: $selectedDate, showingEditor: $showingEditor, selectedThemeRaw: $selectedThemeRaw, compact: compact) {
+                        RestWindowManager.shared.show(theme: theme) {
+                            RestWindowManager.shared.close()
+                        }
+                    }
                         .frame(width: sidebarWidth)
                     Rectangle()
                         .fill(theme.palette.line)
                         .frame(width: 1)
-                    DayDetail(selectedDate: $selectedDate, showingEditor: $showingEditor, editingItem: $editingItem, showingRestMode: $showingRestMode, compact: compact)
+                    DayDetail(selectedDate: $selectedDate, showingEditor: $showingEditor, editingItem: $editingItem, compact: compact)
                         .frame(minWidth: 0, maxWidth: .infinity)
                 }
                 .padding(innerPadding)
@@ -1860,19 +1995,6 @@ struct ContentView: View {
         .onChange(of: showingEditor) { isShowing in
             if !isShowing { editingItem = nil }
         }
-        .onChange(of: showingRestMode) { isShowing in
-            if isShowing {
-                RestWindowManager.shared.show(theme: currentTheme) {
-                    showingRestMode = false
-                }
-            } else {
-                RestWindowManager.shared.close()
-            }
-        }
-    }
-
-    private var currentTheme: AppTheme {
-        AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista
     }
 
     private func showDailyGreetingIfNeeded() {
@@ -1904,6 +2026,7 @@ struct Sidebar: View {
     @Binding var showingEditor: Bool
     @Binding var selectedThemeRaw: String
     let compact: Bool
+    let onStartRestMode: () -> Void
     @State private var visibleMonth = Date()
 
     var body: some View {
@@ -1923,16 +2046,12 @@ struct Sidebar: View {
 
                 CalendarPanel(selectedDate: $selectedDate, visibleMonth: $visibleMonth)
 
-                Button {
-                    showingEditor = true
-                } label: {
-                    Label("添加今日事项", systemImage: "plus.circle.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .noWrap()
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, compact ? 10 : 12)
-                }
-                .buttonStyle(PrimaryButtonStyle())
+                SidebarQuickActionRow(
+                    compact: compact,
+                    onRest: onStartRestMode,
+                    onToday: { selectedDate = Date() },
+                    onNewItem: { showingEditor = true }
+                )
 
                 VStack(alignment: .leading, spacing: 12) {
                     Label("快捷概览", systemImage: "sparkles")
@@ -1962,6 +2081,94 @@ struct Sidebar: View {
     private var todaySummary: String {
         let count = store.count(on: Date())
         return count == 0 ? "今天还没有安排，给自己留一点秩序。" : "今天已有 \(count) 个事项等待处理。"
+    }
+}
+
+struct SidebarQuickActionRow: View {
+    @Environment(\.appTheme) private var theme
+    let compact: Bool
+    let onRest: () -> Void
+    let onToday: () -> Void
+    let onNewItem: () -> Void
+
+    var body: some View {
+        HStack(spacing: compact ? 7 : 9) {
+            SidebarQuickActionButton(
+                title: compact ? "休鼾" : "休鼾一下",
+                systemImage: "moon.zzz.fill",
+                accent: theme.palette.warm,
+                action: onRest
+            )
+            SidebarQuickActionButton(
+                title: "今天",
+                systemImage: "calendar",
+                accent: theme.palette.cyan,
+                action: onToday
+            )
+            SidebarQuickActionButton(
+                title: "新事项",
+                systemImage: "plus",
+                accent: theme.palette.accent,
+                isPrimary: true,
+                action: onNewItem
+            )
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+struct SidebarQuickActionButton: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let systemImage: String
+    let accent: Color
+    var isPrimary = false
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .bold))
+                Text(title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .noWrap(scale: 0.62)
+            }
+            .foregroundStyle(isPrimary ? .white : theme.palette.text)
+            .frame(maxWidth: .infinity, minHeight: 42)
+            .padding(.horizontal, 8)
+            .background(buttonBackground, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(isPrimary ? Color.white.opacity(0.22) : accent.opacity(isHovering ? 0.74 : 0.36), lineWidth: isHovering ? 1.35 : 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovering ? 1.025 : 1)
+        .shadow(color: accent.opacity(isHovering ? 0.22 : 0.10), radius: isHovering ? 14 : 8, x: 0, y: 5)
+        .animation(.spring(response: 0.20, dampingFraction: 0.80), value: isHovering)
+        .onHover { isHovering = $0 }
+    }
+
+    private var buttonBackground: some ShapeStyle {
+        if isPrimary {
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [theme.palette.cyan.opacity(0.90), theme.palette.accent.opacity(0.86)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+        return AnyShapeStyle(
+            LinearGradient(
+                colors: [accent.opacity(0.22), theme.palette.cardStrong.opacity(0.88)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
     }
 }
 
@@ -2535,6 +2742,8 @@ struct CustomIconCard: View {
 struct IconSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
+    @AppStorage("cardOpacityPercent") private var cardOpacityPercent = 20.0
+    @AppStorage("cardBlurPercent") private var cardBlurPercent = 45.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -2565,6 +2774,11 @@ struct IconSettingsSheet: View {
 
             CustomIconCard(compact: false)
 
+            VisualTuningCard(
+                opacityPercent: $cardOpacityPercent,
+                blurPercent: $cardBlurPercent
+            )
+
             HStack {
                 Spacer()
                 Button("完成") {
@@ -2586,6 +2800,59 @@ struct IconSettingsSheet: View {
                     .offset(x: 210, y: -170)
             }
         )
+    }
+}
+
+struct VisualTuningCard: View {
+    @Environment(\.appTheme) private var theme
+    @Binding var opacityPercent: Double
+    @Binding var blurPercent: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(theme.palette.cyan)
+                    .frame(width: 34, height: 34)
+                    .background(theme.palette.cyan.opacity(0.15), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("卡片玻璃质感")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    Text("调节功能卡片的透明度与高斯模糊强度。")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                }
+                Spacer()
+                Button("重置") {
+                    opacityPercent = 20
+                    blurPercent = 45
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .frame(width: 72)
+            }
+
+            tuningSlider(title: "透明度调整", value: $opacityPercent, range: 6...60)
+            tuningSlider(title: "高斯模糊值调整", value: $blurPercent, range: 0...85)
+        }
+        .padding(16)
+        .glassPanel(radius: 18, active: true)
+    }
+
+    private func tuningSlider(title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+        HStack(spacing: 14) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(theme.palette.text)
+                .frame(width: 104, alignment: .leading)
+            Slider(value: value, in: range, step: 1)
+                .tint(theme.palette.accent)
+            Text("\(Int(value.wrappedValue.rounded()))%")
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.palette.cyan)
+                .frame(width: 44, alignment: .trailing)
+        }
     }
 }
 
@@ -2773,6 +3040,7 @@ struct CalendarDayCell: View {
 struct WeatherCard: View {
     @EnvironmentObject private var weatherStore: WeatherStore
     @Environment(\.appTheme) private var theme
+    @AppStorage("cardOpacityPercent") private var cardOpacityPercent = 20.0
     let compact: Bool
 
     var body: some View {
@@ -2786,11 +3054,11 @@ struct WeatherCard: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text("今日天气")
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(theme.palette.muted)
+                    .foregroundStyle(Color.white.opacity(0.76))
                     .noWrap()
                 Text(primaryText)
                     .font(.system(size: compact ? 19 : 23, weight: .bold, design: .rounded))
-                    .foregroundStyle(theme.palette.text)
+                    .foregroundStyle(Color.white)
                     .noWrap(scale: 0.7)
             }
             .layoutPriority(1)
@@ -2800,7 +3068,7 @@ struct WeatherCard: View {
             VStack(alignment: .trailing, spacing: 5) {
                 Text(secondaryText)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(theme.palette.cyan)
+                    .foregroundStyle(Color.white.opacity(0.84))
                     .noWrap(scale: 0.72)
                 Button {
                     weatherStore.refresh()
@@ -2815,6 +3083,8 @@ struct WeatherCard: View {
             }
         }
         .padding(compact ? 14 : 16)
+        .background(weatherBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .glassPanel(radius: 20, active: weatherStore.info != nil)
         .hoverLift()
         .onAppear {
@@ -2832,6 +3102,41 @@ struct WeatherCard: View {
     private var secondaryText: String {
         guard let info = weatherStore.info else { return "当前城市" }
         return "风速 \(Int(info.windSpeed.rounded())) km/h"
+    }
+
+    private var weatherBackgroundName: String {
+        AppBackgroundLibrary.weatherBackgroundName(for: weatherStore.info?.code)
+    }
+
+    private var weatherBackground: some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let image = AppBackgroundLibrary.image(named: weatherBackgroundName) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                        .opacity(weatherImageOpacity)
+                } else {
+                    LinearGradient(colors: [theme.palette.ink, theme.palette.surface], startPoint: .topLeading, endPoint: .bottomTrailing)
+                }
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.42),
+                        Color.black.opacity(0.22),
+                        theme.palette.ink.opacity(0.58)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                theme.palette.accent.opacity(0.10)
+            }
+        }
+    }
+
+    private var weatherImageOpacity: Double {
+        min(0.86, max(0.42, cardOpacityPercent / 100 + 0.42))
     }
 }
 
@@ -2863,6 +3168,7 @@ struct RestStartCard: View {
             .padding(.horizontal, compact ? 9 : 11)
             .padding(.vertical, compact ? 8 : 10)
             .glassPanel(radius: 16, active: true)
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
         .hoverLift()
@@ -2880,15 +3186,6 @@ struct RestModeView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [
-                    theme.palette.ink.opacity(0.98),
-                    theme.palette.surface.opacity(0.96),
-                    theme.palette.accent2.opacity(0.35)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
             RestWallpaper(theme: theme, animate: animate)
             VStack(spacing: 26) {
                 Spacer()
@@ -3003,33 +3300,66 @@ final class RestWindowManager {
 struct RestWallpaper: View {
     let theme: AppTheme
     let animate: Bool
+    @State private var backgroundName = AppBackgroundLibrary.randomImmersiveBackgroundName()
 
     var body: some View {
-        ZStack {
-            ForEach(0..<8, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 120, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [theme.palette.accent.opacity(0.12), theme.palette.warm.opacity(0.10), .clear],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: CGFloat(1 + index % 3)
+        GeometryReader { proxy in
+            ZStack {
+                if let image = AppBackgroundLibrary.image(named: backgroundName) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                        .scaleEffect(animate ? 1.04 : 1.0)
+                } else {
+                    LinearGradient(
+                        colors: [
+                            theme.palette.ink.opacity(0.98),
+                            theme.palette.surface.opacity(0.96),
+                            theme.palette.accent2.opacity(0.35)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
-                    .frame(width: CGFloat(260 + index * 120), height: CGFloat(130 + index * 70))
-                    .rotationEffect(.degrees(Double(index * 11) + (animate ? 8 : -8)))
-                    .offset(x: animate ? CGFloat(index * 9 - 30) : CGFloat(30 - index * 8), y: CGFloat(index * 10 - 45))
+                }
+
+                Color.black.opacity(0.34)
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.58),
+                        Color.black.opacity(0.16),
+                        theme.palette.ink.opacity(0.62)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+
+                ForEach(0..<8, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 120, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [theme.palette.accent.opacity(0.16), theme.palette.warm.opacity(0.13), .clear],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: CGFloat(1 + index % 3)
+                        )
+                        .frame(width: CGFloat(260 + index * 120), height: CGFloat(130 + index * 70))
+                        .rotationEffect(.degrees(Double(index * 11) + (animate ? 8 : -8)))
+                        .offset(x: animate ? CGFloat(index * 9 - 30) : CGFloat(30 - index * 8), y: CGFloat(index * 10 - 45))
+                }
+                Circle()
+                    .fill(theme.palette.accent.opacity(0.18))
+                    .frame(width: 420, height: 420)
+                    .blur(radius: 90)
+                    .offset(x: animate ? -260 : -180, y: animate ? -180 : -260)
+                Circle()
+                    .fill(theme.palette.warm.opacity(0.16))
+                    .frame(width: 520, height: 520)
+                    .blur(radius: 100)
+                    .offset(x: animate ? 300 : 220, y: animate ? 210 : 280)
             }
-            Circle()
-                .fill(theme.palette.accent.opacity(0.18))
-                .frame(width: 420, height: 420)
-                .blur(radius: 90)
-                .offset(x: animate ? -260 : -180, y: animate ? -180 : -260)
-            Circle()
-                .fill(theme.palette.warm.opacity(0.16))
-                .frame(width: 520, height: 520)
-                .blur(radius: 100)
-                .offset(x: animate ? 300 : 220, y: animate ? 210 : 280)
         }
     }
 }
@@ -3119,7 +3449,6 @@ struct DayDetail: View {
     @Binding var selectedDate: Date
     @Binding var showingEditor: Bool
     @Binding var editingItem: ReminderItem?
-    @Binding var showingRestMode: Bool
     let compact: Bool
     @State private var toastMessage: String?
 
@@ -3138,27 +3467,7 @@ struct DayDetail: View {
                             .noWrap(scale: 0.7)
                     }
                     .layoutPriority(1)
-                    Spacer()
-                    RestStartCard(compact: compact) {
-                        showingRestMode = true
-                    }
-                    .frame(width: compact ? 126 : 150)
-                    Button {
-                        selectedDate = Date()
-                    } label: {
-                        Label("今天", systemImage: "calendar")
-                            .noWrap()
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
-                    .frame(width: compact ? 86 : 100)
-                    Button {
-                        showingEditor = true
-                    } label: {
-                        Label("新事项", systemImage: "plus")
-                            .noWrap()
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .frame(width: compact ? 94 : 112)
+                    Spacer(minLength: 0)
                 }
                 .padding(.top, compact ? 16 : 24)
 
