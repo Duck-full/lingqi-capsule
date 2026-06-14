@@ -43,7 +43,7 @@ final class ReminderStore: ObservableObject {
     @Published private(set) var items: [ReminderItem] = []
 
     private let fileURL: URL
-    private let saveQueue = DispatchQueue(label: "local.codex.xiaoding.reminders.save", qos: .utility)
+    private let saveQueue = DispatchQueue(label: "local.codex.lingqi.reminders.save", qos: .utility)
     private var terminationObserver: NSObjectProtocol?
 
     init() {
@@ -182,7 +182,7 @@ final class NoteStore: ObservableObject {
     @Published private var notesByDate: [String: String] = [:]
 
     private let fileURL: URL
-    private let saveQueue = DispatchQueue(label: "local.codex.xiaoding.notes.save", qos: .utility)
+    private let saveQueue = DispatchQueue(label: "local.codex.lingqi.notes.save", qos: .utility)
     private var pendingSave: DispatchWorkItem?
     private var terminationObserver: NSObjectProtocol?
 
@@ -388,7 +388,7 @@ struct EmotionalCopy {
 
     static let greetings: [EmotionalCopy] = [
         EmotionalCopy(title: "今天也轻一点", message: "先把最重要的一件事放到眼前，剩下的慢慢来。", symbol: "sun.max.fill"),
-        EmotionalCopy(title: "欢迎回来", message: "小Ding已经准备好陪你把今天拆成更容易完成的小步。", symbol: "sparkles"),
+        EmotionalCopy(title: "欢迎回来", message: "灵栖胶囊已经准备好陪你把今天拆成更容易完成的小步。", symbol: "sparkles"),
         EmotionalCopy(title: "给大脑留点余地", message: "事项可以被记录，心里就不用一直惦记。", symbol: "heart.text.square.fill"),
         EmotionalCopy(title: "从容开工", message: "不用一下子处理所有事，先选择一个清晰的开始。", symbol: "leaf.fill"),
         EmotionalCopy(title: "你已经在路上", message: "打开这一刻，就算是今天的第一个微小推进。", symbol: "checkmark.seal.fill")
@@ -636,7 +636,7 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
 
     func schedule(item: ReminderItem) {
         let content = UNMutableNotificationContent()
-        content.title = "小Ding助手"
+        content.title = "灵栖胶囊Capsule"
         content.body = item.notes.isEmpty ? "该处理今天的事项了。" : item.notes
         content.subtitle = item.title
         content.sound = .default
@@ -695,7 +695,7 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
 
     func sendTestNotification() {
         let content = UNMutableNotificationContent()
-        content.title = "小Ding助手"
+        content.title = "灵栖胶囊Capsule"
         content.subtitle = "系统通知测试"
         content.body = "如果你看到这条通知，说明 macOS 系统提醒已经可以正常工作。"
         content.sound = .default
@@ -707,7 +707,7 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
 
     private func attachNotificationIcon(to content: UNMutableNotificationContent) {
         guard let url = Bundle.main.url(forResource: "NotificationIcon", withExtension: "png"),
-              let attachment = try? UNNotificationAttachment(identifier: "xiaoding-notification-icon", url: url, options: nil) else {
+              let attachment = try? UNNotificationAttachment(identifier: "lingqi-notification-icon", url: url, options: nil) else {
             return
         }
         content.attachments = [attachment]
@@ -741,7 +741,7 @@ struct DailyReminderWidgetApp: App {
     @StateObject private var noteStore = NoteStore()
     @StateObject private var iconManager = AppIconManager()
     @StateObject private var weatherStore = WeatherStore()
-    @AppStorage("selectedTheme") private var selectedThemeRaw = AppTheme.ancientInk.rawValue
+    @AppStorage("selectedTheme") private var selectedThemeRaw = AppTheme.immersiveVista.rawValue
 
     var body: some Scene {
         WindowGroup {
@@ -758,11 +758,11 @@ struct DailyReminderWidgetApp: App {
             CommandGroup(replacing: .newItem) { }
         }
 
-        MenuBarExtra("小Ding助手", systemImage: "checklist") {
+        MenuBarExtra("灵栖胶囊Capsule", systemImage: "checklist") {
             MenuBarQuickPanel()
                 .environmentObject(store)
                 .environmentObject(noteStore)
-                .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .ancientInk)
+                .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
         }
         .menuBarExtraStyle(.window)
     }
@@ -773,7 +773,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationScheduler.shared.configure()
         NSApp.setActivationPolicy(.regular)
         for window in NSApplication.shared.windows {
-            window.title = "小Ding助手"
+            window.title = "灵栖胶囊Capsule"
             window.isMovableByWindowBackground = true
             window.minSize = NSSize(width: 900, height: 560)
             if window.frame.width < 1100 || window.frame.height < 720 {
@@ -1215,7 +1215,7 @@ enum ThemeSymbolRole {
 }
 
 private struct AppThemeKey: EnvironmentKey {
-    static let defaultValue: AppTheme = .ancientInk
+    static let defaultValue: AppTheme = .immersiveVista
 }
 
 extension EnvironmentValues {
@@ -1610,7 +1610,7 @@ struct MenuBarQuickPanel: View {
                     Image(systemName: "arrow.up.forward.app")
                 }
                 .buttonStyle(IconButtonStyle())
-                .help("打开小Ding助手")
+                .help("打开灵栖胶囊Capsule")
             }
 
             InspirationInsightRow(analysis: inspirationAnalysis, compact: true)
@@ -1778,7 +1778,7 @@ struct MenuBarQuickPanel: View {
 struct ContentView: View {
     @EnvironmentObject private var store: ReminderStore
     @EnvironmentObject private var iconManager: AppIconManager
-    @AppStorage("selectedTheme") private var selectedThemeRaw = AppTheme.ancientInk.rawValue
+    @AppStorage("selectedTheme") private var selectedThemeRaw = AppTheme.immersiveVista.rawValue
     @State private var selectedDate = Date()
     @State private var showingEditor = false
     @State private var editingItem: ReminderItem?
@@ -1790,7 +1790,7 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let theme = AppTheme(rawValue: selectedThemeRaw) ?? .ancientInk
+            let theme = AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista
             let compact = proxy.size.width < 1020
             let outerPadding: CGFloat = compact ? 10 : 20
             let innerPadding: CGFloat = compact ? 12 : 18
@@ -1855,7 +1855,7 @@ struct ContentView: View {
         .sheet(isPresented: $showingIconSettings) {
             IconSettingsSheet()
                 .environmentObject(iconManager)
-                .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .ancientInk)
+                .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
         }
         .onChange(of: showingEditor) { isShowing in
             if !isShowing { editingItem = nil }
@@ -1872,7 +1872,7 @@ struct ContentView: View {
     }
 
     private var currentTheme: AppTheme {
-        AppTheme(rawValue: selectedThemeRaw) ?? .ancientInk
+        AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista
     }
 
     private func showDailyGreetingIfNeeded() {
@@ -1910,7 +1910,7 @@ struct Sidebar: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: compact ? 14 : 18) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("小Ding助手")
+                    Text("灵栖胶囊Capsule")
                         .font(.system(size: compact ? 26 : 30, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.palette.text)
                         .noWrap(scale: 0.75)
@@ -1947,7 +1947,7 @@ struct Sidebar: View {
                 .padding(16)
                 .glassPanel(radius: 18)
 
-                MoodNote(themeName: AppTheme(rawValue: selectedThemeRaw) ?? .ancientInk)
+                MoodNote(themeName: AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
 
                 ThemeSwitcher(selectedThemeRaw: $selectedThemeRaw, compact: compact)
 
@@ -2115,7 +2115,7 @@ struct ThemeSwitcher: View {
     }
 
     private var currentTheme: AppTheme {
-        AppTheme(rawValue: selectedThemeRaw) ?? .ancientInk
+        AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista
     }
 }
 
@@ -2992,7 +2992,7 @@ final class RestWindowManager {
 
     private func restoreMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
-        if let mainWindow = NSApplication.shared.windows.first(where: { $0.title == "小Ding助手" }) {
+        if let mainWindow = NSApplication.shared.windows.first(where: { $0.title == "灵栖胶囊Capsule" }) {
             mainWindow.makeKeyAndOrderFront(nil)
             return
         }
