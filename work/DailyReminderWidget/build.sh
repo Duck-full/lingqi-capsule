@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT_ROOT="$ROOT/../../outputs"
 APP_NAME="小Ding助手"
 BUNDLE_ID="local.codex.xiaoding-assistant"
-APP_VERSION="1.1.0"
-APP_BUILD="2"
+APP_VERSION="1.1.1"
+APP_BUILD="3"
 APP="$OUT_ROOT/$APP_NAME.app"
 DMG_ROOT="$ROOT/dmgroot"
 CONTENTS="$APP/Contents"
@@ -82,6 +82,11 @@ fi
 if [[ -f "$DEFAULT_ICON" ]]; then
   cp "$DEFAULT_ICON" "$RESOURCES/AppIcon.png"
 fi
+for BACKGROUND in "$ROOT"/Assets/ImmersiveVistaBackground*.jpg; do
+  if [[ -f "$BACKGROUND" ]]; then
+    cp "$BACKGROUND" "$RESOURCES/"
+  fi
+done
 
 for ARCH in x86_64 arm64; do
   swiftc \

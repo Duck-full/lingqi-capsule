@@ -40,14 +40,11 @@ struct ReminderItem: Codable, Identifiable, Equatable {
 }
 
 final class ReminderStore: ObservableObject {
-    @Published var items: [ReminderItem] = [] {
-        didSet {
-            save()
-            NotificationScheduler.shared.reschedule(items: items)
-        }
-    }
+    @Published private(set) var items: [ReminderItem] = []
 
     private let fileURL: URL
+    private let saveQueue = DispatchQueue(label: "local.codex.xiaoding.reminders.save", qos: .utility)
+    private var terminationObserver: NSObjectProtocol?
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -55,27 +52,41 @@ final class ReminderStore: ObservableObject {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         fileURL = folder.appendingPathComponent("reminders.json")
         load()
+        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.flushSave()
+        }
+    }
+
+    deinit {
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
+        }
+        flushSave()
     }
 
     func add(_ item: ReminderItem) {
         items.append(item)
         sort()
+        persistAndSchedule(item)
     }
 
     func update(_ item: ReminderItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[index] = item
         sort()
+        persistAndSchedule(item)
     }
 
     func delete(_ item: ReminderItem) {
         items.removeAll { $0.id == item.id }
+        persist()
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: NotificationScheduler.identifiers(for: item))
     }
 
     func toggleDone(_ item: ReminderItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[index].isDone.toggle()
+        persistAndSchedule(items[index])
     }
 
     func items(on day: Date) -> [ReminderItem] {
@@ -108,42 +119,72 @@ final class ReminderStore: ObservableObject {
         }
     }
 
-    private func save() {
+    private func persistAndSchedule(_ item: ReminderItem) {
+        persist()
+        NotificationScheduler.shared.reschedule(item: item)
+    }
+
+    private func persist() {
+        let snapshot = items
+        let fileURL = fileURL
+        saveQueue.async {
+            Self.write(snapshot, to: fileURL)
+        }
+    }
+
+    private func flushSave() {
+        let snapshot = items
+        let fileURL = fileURL
+        saveQueue.sync {
+            Self.write(snapshot, to: fileURL)
+        }
+    }
+
+    private static func write(_ items: [ReminderItem], to fileURL: URL) {
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(items)
             try data.write(to: fileURL, options: [.atomic])
         } catch {
-            NSSound.beep()
+            NSLog("Failed to save reminders: \(error.localizedDescription)")
         }
     }
 }
 
 enum DateKey {
-    static func string(from date: Date) -> String {
+    private static let keyFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "zh_Hans_CN")
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
-    }
+        return formatter
+    }()
 
-    static func display(from date: Date) -> String {
+    private static let displayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_Hans_CN")
         formatter.dateFormat = "yyyy年M月d日 EEEE"
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    static func string(from date: Date) -> String {
+        keyFormatter.string(from: date)
+    }
+
+    static func display(from date: Date) -> String {
+        displayFormatter.string(from: date)
     }
 }
 
 final class NoteStore: ObservableObject {
-    @Published private var notesByDate: [String: String] = [:] {
-        didSet { save() }
-    }
+    @Published private var notesByDate: [String: String] = [:]
 
     private let fileURL: URL
+    private let saveQueue = DispatchQueue(label: "local.codex.xiaoding.notes.save", qos: .utility)
+    private var pendingSave: DispatchWorkItem?
+    private var terminationObserver: NSObjectProtocol?
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -151,6 +192,16 @@ final class NoteStore: ObservableObject {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         fileURL = folder.appendingPathComponent("daily-notes.json")
         load()
+        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.flushSave()
+        }
+    }
+
+    deinit {
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
+        }
+        flushSave()
     }
 
     func note(for date: Date) -> String {
@@ -159,11 +210,14 @@ final class NoteStore: ObservableObject {
 
     func setNote(_ note: String, for date: Date) {
         let key = DateKey.string(from: date)
+        let oldValue = notesByDate[key] ?? ""
         if note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             notesByDate.removeValue(forKey: key)
         } else {
             notesByDate[key] = note
         }
+        guard oldValue != note else { return }
+        scheduleSave()
     }
 
     func hasNote(on date: Date) -> Bool {
@@ -175,8 +229,29 @@ final class NoteStore: ObservableObject {
         notesByDate = (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
     }
 
-    private func save() {
-        guard let data = try? JSONEncoder().encode(notesByDate) else { return }
+    func flushSave() {
+        pendingSave?.cancel()
+        pendingSave = nil
+        let snapshot = notesByDate
+        let fileURL = fileURL
+        saveQueue.sync {
+            Self.write(snapshot, to: fileURL)
+        }
+    }
+
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        let snapshot = notesByDate
+        let fileURL = fileURL
+        let work = DispatchWorkItem {
+            Self.write(snapshot, to: fileURL)
+        }
+        pendingSave = work
+        saveQueue.asyncAfter(deadline: .now() + 0.8, execute: work)
+    }
+
+    private static func write(_ notes: [String: String], to fileURL: URL) {
+        guard let data = try? JSONEncoder().encode(notes) else { return }
         try? data.write(to: fileURL, options: [.atomic])
     }
 }
@@ -553,6 +628,12 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
         items.filter { !$0.isDone }.forEach { schedule(item: $0) }
     }
 
+    func reschedule(item: ReminderItem) {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: Self.identifiers(for: item))
+        guard !item.isDone else { return }
+        schedule(item: item)
+    }
+
     func schedule(item: ReminderItem) {
         let content = UNMutableNotificationContent()
         content.title = "小Ding助手"
@@ -728,9 +809,20 @@ struct ThemePalette {
 
 private let inspirationCharacterLimit = 300
 
+enum PerformanceTuning {
+    static var prefersReducedEffects: Bool {
+        #if arch(x86_64)
+        return true
+        #else
+        return false
+        #endif
+    }
+}
+
 enum AppTheme: String, CaseIterable, Identifiable {
     case neonPulse
     case ios27Glass
+    case immersiveVista
     case weatherChild
     case yourName
     case demonBlade
@@ -750,6 +842,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .neonPulse: return "霓虹脉冲"
         case .ios27Glass: return "iOS27 毛玻璃"
+        case .immersiveVista: return "沉浸风景玻璃"
         case .weatherChild: return "天气之子"
         case .yourName: return "你的名字"
         case .demonBlade: return "鬼灭之刃"
@@ -769,6 +862,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .neonPulse: return "霓虹"
         case .ios27Glass: return "玻璃"
+        case .immersiveVista: return "沉浸"
         case .weatherChild: return "晴雨"
         case .yourName: return "星河"
         case .demonBlade: return "刃纹"
@@ -788,6 +882,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .neonPulse: return "今天的节奏很亮，慢慢推进也会抵达。"
         case .ios27Glass: return "像一层清透玻璃，把今天的重点温柔托起来。"
+        case .immersiveVista: return "把自己放进安静风景里，慢慢写下真正重要的事。"
         case .weatherChild: return "云层会散开，先把心里那束光写下来。"
         case .yourName: return "把今天的片段系成结，重要的事就不会走散。"
         case .demonBlade: return "稳住呼吸，今天也可以利落地完成一件事。"
@@ -807,6 +902,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .neonPulse: return "sparkles"
         case .ios27Glass: return "app.gift.fill"
+        case .immersiveVista: return "mountain.2.fill"
         case .weatherChild: return "cloud.sun.rain.fill"
         case .yourName: return "sparkle"
         case .demonBlade: return "flame.fill"
@@ -826,6 +922,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .neonPulse: return "把今天点亮一点"
         case .ios27Glass: return "清透地开始"
+        case .immersiveVista: return "安静沉入风景"
         case .weatherChild: return "等一阵晴光"
         case .yourName: return "把片刻系紧"
         case .demonBlade: return "稳住呼吸"
@@ -864,6 +961,17 @@ enum AppTheme: String, CaseIterable, Identifiable {
                 accent: Color(red: 0.63, green: 0.86, blue: 1.0),
                 accent2: Color(red: 0.47, green: 0.76, blue: 1.0),
                 warm: Color(red: 0.82, green: 1.0, blue: 0.92)
+            )
+        case .immersiveVista:
+            return ThemePalette(
+                ink: Color(red: 0.04, green: 0.06, blue: 0.06),
+                plum: Color(red: 0.12, green: 0.15, blue: 0.14),
+                surface: Color(red: 0.18, green: 0.21, blue: 0.18),
+                glowA: Color(red: 0.82, green: 0.88, blue: 0.78),
+                glowB: Color(red: 0.54, green: 0.66, blue: 0.63),
+                accent: Color(red: 0.88, green: 0.92, blue: 0.84),
+                accent2: Color(red: 0.60, green: 0.72, blue: 0.68),
+                warm: Color(red: 0.96, green: 0.86, blue: 0.66)
             )
         case .weatherChild:
             return ThemePalette(
@@ -1003,6 +1111,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
     var backgroundStyle: ThemeBackgroundStyle {
         switch self {
         case .ios27Glass: return .liquidGlass
+        case .immersiveVista: return .immersiveScene
         case .weatherChild: return .animeWeather
         case .yourName: return .animeStars
         case .demonBlade: return .animeBlade
@@ -1016,6 +1125,12 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     func symbol(_ role: ThemeSymbolRole) -> String {
         switch (self, role) {
+        case (.immersiveVista, .theme): return "mountain.2"
+        case (.immersiveVista, .calendar): return "calendar.badge.clock"
+        case (.immersiveVista, .note): return "text.alignleft"
+        case (.immersiveVista, .notification): return "bell.and.waves.left.and.right"
+        case (.immersiveVista, .task): return "checkmark.circle"
+        case (.immersiveVista, .mood): return "cloud.rain.fill"
         case (.weatherChild, .theme): return "cloud.sun.rain"
         case (.weatherChild, .calendar): return "sun.max"
         case (.weatherChild, .note): return "cloud.sun.fill"
@@ -1080,6 +1195,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
 enum ThemeBackgroundStyle {
     case neon
     case liquidGlass
+    case immersiveScene
     case animeWeather
     case animeStars
     case animeBlade
@@ -1116,27 +1232,71 @@ struct GlassPanel: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(theme.backgroundStyle == .liquidGlass ? Color.white.opacity(0.16) : theme.palette.card)
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: theme.backgroundStyle == .liquidGlass ?
-                                    [Color.white.opacity(0.24), theme.palette.accent.opacity(0.07), Color.white.opacity(0.05)] :
-                                    [Color.white.opacity(0.12), Color.white.opacity(0.035)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                }
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .stroke(isActive ? theme.palette.cyan.opacity(0.78) : (theme.backgroundStyle == .liquidGlass ? Color.white.opacity(0.22) : theme.palette.line), lineWidth: isActive ? 1.4 : 1)
-            )
-            .shadow(color: isActive ? theme.palette.cyan.opacity(0.22) : Color.black.opacity(theme.backgroundStyle == .liquidGlass ? 0.16 : 0.24), radius: isActive ? 20 : 14, x: 0, y: 9)
+            .background(panelBackground)
+            .overlay(panelBorder)
+            .shadow(color: panelShadowColor, radius: panelShadowRadius, x: 0, y: 9)
+    }
+
+    private var isImmersive: Bool {
+        theme.backgroundStyle == .immersiveScene
+    }
+
+    private var isLiquid: Bool {
+        theme.backgroundStyle == .liquidGlass
+    }
+
+    private var baseFill: Color {
+        if isImmersive { return Color.black.opacity(0.20) }
+        if isLiquid { return Color.white.opacity(0.16) }
+        return theme.palette.card
+    }
+
+    private var gradientColors: [Color] {
+        if isImmersive {
+            return [Color.white.opacity(0.18), Color.white.opacity(0.055), Color.black.opacity(0.10)]
+        }
+        if isLiquid {
+            return [Color.white.opacity(0.24), theme.palette.accent.opacity(0.07), Color.white.opacity(0.05)]
+        }
+        return [Color.white.opacity(0.12), Color.white.opacity(0.035)]
+    }
+
+    private var inactiveStroke: Color {
+        if isImmersive { return Color.white.opacity(0.30) }
+        if isLiquid { return Color.white.opacity(0.22) }
+        return theme.palette.line
+    }
+
+    private var panelShadowColor: Color {
+        if isActive { return theme.palette.cyan.opacity(0.22) }
+        if isImmersive { return Color.black.opacity(0.30) }
+        if isLiquid { return Color.black.opacity(0.16) }
+        return Color.black.opacity(0.24)
+    }
+
+    private var panelShadowRadius: CGFloat {
+        if isActive { return 20 }
+        return isImmersive ? 18 : 14
+    }
+
+    private var panelBackground: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(baseFill)
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: gradientColors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+    }
+
+    private var panelBorder: some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(isActive ? theme.palette.cyan.opacity(0.78) : inactiveStroke, lineWidth: isActive ? 1.4 : 1)
     }
 }
 
@@ -1173,36 +1333,50 @@ struct HoverLiftModifier: ViewModifier {
 }
 
 struct AnimatedGlowBackground: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let theme: AppTheme
     @State private var animate = false
+    @State private var immersiveBackgroundName = Self.immersiveBackgroundNames.randomElement() ?? "ImmersiveVistaBackground01"
+
+    private static let immersiveBackgroundNames = [
+        "ImmersiveVistaBackground01",
+        "ImmersiveVistaBackground02",
+        "ImmersiveVistaBackground03"
+    ]
 
     var body: some View {
+        let reducedEffects = reduceMotion || PerformanceTuning.prefersReducedEffects
         ZStack {
-            LinearGradient(
-                colors: [theme.palette.ink, theme.palette.plum, theme.palette.surface],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Circle()
-                .fill(theme.palette.glowA.opacity(0.24))
-                .frame(width: 520, height: 520)
-                .blur(radius: 70)
-                .offset(x: animate ? 360 : 280, y: animate ? -250 : -170)
-            Circle()
-                .fill(theme.palette.glowB.opacity(0.23))
-                .frame(width: 620, height: 620)
-                .blur(radius: 86)
-                .offset(x: animate ? -360 : -260, y: animate ? 330 : 250)
-            LinearGradient(
-                colors: [theme.palette.warm.opacity(0.12), .clear, theme.palette.accent2.opacity(0.12)],
-                startPoint: animate ? .bottomTrailing : .bottomLeading,
-                endPoint: .topTrailing
-            )
-            ThemeBackgroundIllustration(theme: theme, animate: animate)
-            themeDecoration
+            if theme.backgroundStyle == .immersiveScene {
+                immersiveSceneBackground(reducedEffects: reducedEffects)
+            } else {
+                LinearGradient(
+                    colors: [theme.palette.ink, theme.palette.plum, theme.palette.surface],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Circle()
+                    .fill(theme.palette.glowA.opacity(reducedEffects ? 0.16 : 0.24))
+                    .frame(width: reducedEffects ? 440 : 520, height: reducedEffects ? 440 : 520)
+                    .blur(radius: reducedEffects ? 48 : 70)
+                    .offset(x: animate ? 360 : 280, y: animate ? -250 : -170)
+                Circle()
+                    .fill(theme.palette.glowB.opacity(reducedEffects ? 0.15 : 0.23))
+                    .frame(width: reducedEffects ? 500 : 620, height: reducedEffects ? 500 : 620)
+                    .blur(radius: reducedEffects ? 56 : 86)
+                    .offset(x: animate ? -360 : -260, y: animate ? 330 : 250)
+                LinearGradient(
+                    colors: [theme.palette.warm.opacity(reducedEffects ? 0.08 : 0.12), .clear, theme.palette.accent2.opacity(reducedEffects ? 0.08 : 0.12)],
+                    startPoint: animate ? .bottomTrailing : .bottomLeading,
+                    endPoint: .topTrailing
+                )
+                ThemeBackgroundIllustration(theme: theme, animate: reducedEffects ? false : animate)
+                themeDecoration(reducedEffects: reducedEffects)
+            }
         }
         .ignoresSafeArea()
         .onAppear {
+            guard !reducedEffects, theme.backgroundStyle != .immersiveScene else { return }
             withAnimation(.easeInOut(duration: 5.5).repeatForever(autoreverses: true)) {
                 animate.toggle()
             }
@@ -1210,11 +1384,58 @@ struct AnimatedGlowBackground: View {
     }
 
     @ViewBuilder
-    private var themeDecoration: some View {
+    private func immersiveSceneBackground(reducedEffects: Bool) -> some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let url = Bundle.main.url(forResource: immersiveBackgroundName, withExtension: "jpg"),
+                   let image = NSImage(contentsOf: url) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                } else {
+                    LinearGradient(colors: [theme.palette.ink, theme.palette.surface], startPoint: .topLeading, endPoint: .bottomTrailing)
+                }
+
+                Color.black.opacity(0.28)
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.50),
+                        Color.black.opacity(0.18),
+                        theme.palette.ink.opacity(0.70)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                RadialGradient(
+                    colors: [theme.palette.warm.opacity(0.18), .clear],
+                    center: .topTrailing,
+                    startRadius: 20,
+                    endRadius: 720
+                )
+
+                if !reducedEffects {
+                    ForEach(0..<8, id: \.self) { index in
+                        Capsule()
+                            .fill(Color.white.opacity(0.055))
+                            .frame(width: 2, height: CGFloat(220 + index * 18))
+                            .rotationEffect(.degrees(-14))
+                            .offset(x: CGFloat(index * 190 - 620), y: CGFloat(index * 42 - 210))
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func themeDecoration(reducedEffects: Bool) -> some View {
         switch theme.backgroundStyle {
+        case .immersiveScene:
+            EmptyView()
         case .liquidGlass:
             ZStack {
-                ForEach(0..<7, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 4 : 7), id: \.self) { index in
                     RoundedRectangle(cornerRadius: 90, style: .continuous)
                         .fill(
                             LinearGradient(
@@ -1239,7 +1460,7 @@ struct AnimatedGlowBackground: View {
             }
         case .future:
             VStack(spacing: 26) {
-                ForEach(0..<16, id: \.self) { _ in
+                ForEach(0..<(reducedEffects ? 8 : 16), id: \.self) { _ in
                     Rectangle()
                         .fill(theme.palette.accent.opacity(0.055))
                         .frame(height: 1)
@@ -1250,7 +1471,7 @@ struct AnimatedGlowBackground: View {
             .offset(y: animate ? 20 : -20)
         case .cartoon:
             ZStack {
-                ForEach(0..<8, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 4 : 8), id: \.self) { index in
                     Circle()
                         .fill((index % 2 == 0 ? theme.palette.warm : theme.palette.accent2).opacity(0.13))
                         .frame(width: CGFloat(70 + index * 14), height: CGFloat(70 + index * 14))
@@ -1260,13 +1481,13 @@ struct AnimatedGlowBackground: View {
         case .animeWeather:
             ZStack {
                 RadialGradient(colors: [theme.palette.warm.opacity(0.22), .clear], center: .topTrailing, startRadius: 10, endRadius: 440)
-                ForEach(0..<8, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 4 : 8), id: \.self) { index in
                     Image(systemName: index % 3 == 0 ? "cloud.fill" : "drop.fill")
                         .font(.system(size: CGFloat(index % 3 == 0 ? 54 : 20), weight: .semibold))
                         .foregroundStyle((index % 3 == 0 ? Color.white : theme.palette.accent).opacity(index % 3 == 0 ? 0.10 : 0.20))
                         .offset(x: CGFloat(index * 128 - 450) + (animate ? 22 : -22), y: CGFloat((index % 4) * 92 - 210) + (animate ? -12 : 12))
                 }
-                ForEach(0..<5, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 2 : 5), id: \.self) { index in
                     Capsule()
                         .fill(theme.palette.accent.opacity(0.10))
                         .frame(width: 120, height: 2)
@@ -1276,14 +1497,14 @@ struct AnimatedGlowBackground: View {
             }
         case .animeStars:
             ZStack {
-                ForEach(0..<18, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 8 : 18), id: \.self) { index in
                     Image(systemName: index % 4 == 0 ? "sparkle" : "star.fill")
                         .font(.system(size: CGFloat(10 + (index % 5) * 4), weight: .semibold))
                         .foregroundStyle((index % 3 == 0 ? theme.palette.warm : theme.palette.accent).opacity(0.18))
                         .offset(x: CGFloat((index * 91) % 780 - 390), y: CGFloat((index * 57) % 520 - 260) + (animate ? 10 : -10))
                         .scaleEffect(animate ? 1.10 : 0.86)
                 }
-                ForEach(0..<4, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 2 : 4), id: \.self) { index in
                     Capsule()
                         .fill(LinearGradient(colors: [.clear, theme.palette.warm.opacity(0.22), .clear], startPoint: .leading, endPoint: .trailing))
                         .frame(width: 260, height: 2)
@@ -1293,14 +1514,14 @@ struct AnimatedGlowBackground: View {
             }
         case .animeBlade:
             ZStack {
-                ForEach(0..<8, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 4 : 8), id: \.self) { index in
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill((index % 2 == 0 ? theme.palette.accent : theme.palette.accent2).opacity(0.12))
                         .frame(width: CGFloat(330 + index * 28), height: 8)
                         .rotationEffect(.degrees(index % 2 == 0 ? -34 : 32))
                         .offset(x: CGFloat(index * 52 - 210), y: CGFloat(index * 62 - 220) + (animate ? 16 : -16))
                 }
-                ForEach(0..<5, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 2 : 5), id: \.self) { index in
                     Image(systemName: index % 2 == 0 ? "flame.fill" : "wind")
                         .font(.system(size: CGFloat(34 + index * 8), weight: .bold))
                         .foregroundStyle((index % 2 == 0 ? theme.palette.accent2 : theme.palette.accent).opacity(0.13))
@@ -1311,14 +1532,14 @@ struct AnimatedGlowBackground: View {
         case .animeForest:
             ZStack {
                 RadialGradient(colors: [theme.palette.warm.opacity(0.14), .clear], center: .bottomLeading, startRadius: 20, endRadius: 520)
-                ForEach(0..<12, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 6 : 12), id: \.self) { index in
                     Image(systemName: index % 4 == 0 ? "book.closed.fill" : "leaf.fill")
                         .font(.system(size: CGFloat(18 + (index % 5) * 8), weight: .semibold))
                         .foregroundStyle((index % 4 == 0 ? theme.palette.warm : theme.palette.accent).opacity(0.14))
                         .rotationEffect(.degrees(Double(index * 23) + (animate ? 8 : -8)))
                         .offset(x: CGFloat((index * 87) % 760 - 380), y: CGFloat((index * 69) % 520 - 260) + (animate ? 14 : -14))
                 }
-                ForEach(0..<4, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 2 : 4), id: \.self) { index in
                     RoundedRectangle(cornerRadius: 90, style: .continuous)
                         .stroke(theme.palette.warm.opacity(0.07), lineWidth: 1)
                         .frame(width: CGFloat(220 + index * 110), height: CGFloat(150 + index * 64))
@@ -1328,7 +1549,7 @@ struct AnimatedGlowBackground: View {
         case .heritage:
             ZStack {
                 RadialGradient(colors: [theme.palette.warm.opacity(0.16), .clear], center: .center, startRadius: 20, endRadius: 520)
-                ForEach(0..<5, id: \.self) { index in
+                ForEach(0..<(reducedEffects ? 3 : 5), id: \.self) { index in
                     RoundedRectangle(cornerRadius: 80, style: .continuous)
                         .stroke(theme.palette.warm.opacity(0.06), lineWidth: 1)
                         .frame(width: CGFloat(260 + index * 120), height: CGFloat(170 + index * 88))
@@ -1367,6 +1588,8 @@ struct MenuBarQuickPanel: View {
     @EnvironmentObject private var noteStore: NoteStore
     @Environment(\.appTheme) private var theme
     @State private var inspirationDraft = ""
+    @State private var inspirationAnalysis = InspirationAnalyzer.analyze("")
+    @State private var analysisWorkItem: DispatchWorkItem?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -1390,7 +1613,7 @@ struct MenuBarQuickPanel: View {
                 .help("打开小Ding助手")
             }
 
-            InspirationInsightRow(analysis: InspirationAnalyzer.analyze(inspirationDraft), compact: true)
+            InspirationInsightRow(analysis: inspirationAnalysis, compact: true)
 
             ZStack(alignment: .topLeading) {
                 if inspirationDraft.isEmpty {
@@ -1407,11 +1630,7 @@ struct MenuBarQuickPanel: View {
                     .background(Color.clear)
                     .frame(height: 112)
                     .onChange(of: inspirationDraft) { value in
-                        let limited = String(value.prefix(inspirationCharacterLimit))
-                        if limited != value {
-                            inspirationDraft = limited
-                        }
-                        noteStore.setNote(limited, for: Date())
+                        updateDraft(value)
                     }
             }
             .padding(8)
@@ -1495,6 +1714,10 @@ struct MenuBarQuickPanel: View {
         )
         .onAppear {
             inspirationDraft = noteStore.note(for: Date())
+            inspirationAnalysis = InspirationAnalyzer.analyze(inspirationDraft)
+        }
+        .onDisappear {
+            noteStore.flushSave()
         }
     }
 
@@ -1524,6 +1747,25 @@ struct MenuBarQuickPanel: View {
         RestWindowManager.shared.show(theme: theme) {
             RestWindowManager.shared.close()
         }
+    }
+
+    private func updateDraft(_ value: String) {
+        let limited = String(value.prefix(inspirationCharacterLimit))
+        if limited != value {
+            inspirationDraft = limited
+            return
+        }
+        noteStore.setNote(limited, for: Date())
+        scheduleAnalysis(for: limited)
+    }
+
+    private func scheduleAnalysis(for text: String) {
+        analysisWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            inspirationAnalysis = InspirationAnalyzer.analyze(text)
+        }
+        analysisWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
     }
 
     private func timeText(_ item: ReminderItem) -> String {
@@ -2055,6 +2297,8 @@ struct InspirationAnalysis {
 
 enum InspirationAnalyzer {
     private static let keywordCandidates = [
+        "用户生态", "平台对接", "用户体系", "UGC社区", "内容发布", "审核机制", "合规备案", "隐私条款", "用户协议", "隐私协议",
+        "个人信息", "应用上架", "IPC备案", "APP备案", "公安备案", "技术层面", "安卓签名", "iOS签名", "域名配置",
         "会议", "客户", "需求", "项目", "版本", "发布", "沟通", "排期", "复盘", "工作",
         "页面", "视觉", "主题", "图标", "动效", "交互", "文案", "风格", "设计", "体验",
         "代码", "开发", "修复", "测试", "打包", "功能", "逻辑", "优化", "问题", "上线",
@@ -2098,11 +2342,6 @@ enum InspirationAnalyzer {
         guard !text.isEmpty else { return [] }
 
         var collected: [String] = []
-        for candidate in keywordCandidates where text.localizedCaseInsensitiveContains(candidate) {
-            appendKeyword(candidate, to: &collected)
-            if collected.count == 4 { return collected }
-        }
-
         let separators = CharacterSet.whitespacesAndNewlines
             .union(.punctuationCharacters)
             .union(CharacterSet(charactersIn: "，。！？、；：,.!?;:（）()【】[]《》<>“”\"'"))
@@ -2112,8 +2351,17 @@ enum InspirationAnalyzer {
             .filter { !$0.isEmpty && $0.count >= 2 }
 
         for fragment in fragments {
-            appendKeyword(fragment, to: &collected)
+            if let semanticKeyword = semanticKeyword(from: fragment) {
+            appendKeyword(semanticKeyword, to: &collected)
+            }
             if collected.count == 4 { break }
+        }
+
+        if collected.count < 4 {
+            for candidate in keywordCandidates.sorted(by: { $0.count > $1.count }) where text.localizedCaseInsensitiveContains(candidate) {
+                appendKeyword(candidate, to: &collected)
+                if collected.count == 4 { return collected }
+            }
         }
 
         return collected
@@ -2122,9 +2370,55 @@ enum InspirationAnalyzer {
     private static func appendKeyword(_ keyword: String, to keywords: inout [String]) {
         let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let shortKeyword = String(trimmed.prefix(6))
-        guard !keywords.contains(shortKeyword) else { return }
-        keywords.append(shortKeyword)
+        let normalized = normalizedKeyword(trimmed)
+        guard normalized.count >= 2, normalized.count <= 6, !keywords.contains(normalized) else { return }
+        keywords.append(normalized)
+    }
+
+    private static func semanticKeyword(from fragment: String) -> String? {
+        let cleaned = normalizedKeyword(fragment)
+        guard cleaned.count >= 2 else { return nil }
+        if cleaned.count <= 6 { return cleaned }
+
+        if cleaned.contains("平台"), cleaned.contains("对接") {
+            return "平台对接"
+        }
+        if cleaned.contains("用户"), cleaned.contains("生态") {
+            return "用户生态"
+        }
+        if cleaned.localizedCaseInsensitiveContains("UGC"), cleaned.contains("社区") {
+            return "UGC社区"
+        }
+        if cleaned.contains("隐私"), cleaned.contains("条款") {
+            return "隐私条款"
+        }
+        if cleaned.contains("审核"), cleaned.contains("机制") {
+            return "审核机制"
+        }
+
+        let connectors = ["以及", "如何", "需要", "哪些", "是否", "可以", "进行", "关于", "针对", "包括", "和", "与", "及", "的"]
+        var segments = [cleaned]
+        for connector in connectors {
+            segments = segments.flatMap { $0.components(separatedBy: connector) }
+        }
+        return segments
+            .map { normalizedKeyword($0) }
+            .first { $0.count >= 2 && $0.count <= 6 && !isLowValueKeyword($0) }
+    }
+
+    private static func normalizedKeyword(_ keyword: String) -> String {
+        var result = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        result = result.replacingOccurrences(of: #"^[0-9一二三四五六七八九十]+[\.、\)]"#, with: "", options: .regularExpression)
+        let suffixes = ["以及", "如何", "哪些", "需要", "进行", "关于", "针对", "包括", "内容", "体系", "机制"]
+        for suffix in suffixes where result.count > suffix.count + 1 && result.hasSuffix(suffix) {
+            result.removeLast(suffix.count)
+            break
+        }
+        return result.trimmingCharacters(in: CharacterSet(charactersIn: "：:，,。.!！?？、；;（）()【】[]《》<>“”\"' "))
+    }
+
+    private static func isLowValueKeyword(_ keyword: String) -> Bool {
+        ["需要", "哪些", "如何", "以及", "进行", "关于", "针对", "内容", "体系", "机制"].contains(keyword)
     }
 }
 
@@ -2949,6 +3243,8 @@ struct NotebookPanel: View {
     let selectedDate: Date
     let compact: Bool
     @State private var draft = ""
+    @State private var inspirationAnalysis = InspirationAnalyzer.analyze("")
+    @State private var analysisWorkItem: DispatchWorkItem?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2990,7 +3286,7 @@ struct NotebookPanel: View {
 
             InspirationProgressBar(progress: inspirationProgress)
 
-            InspirationInsightRow(analysis: InspirationAnalyzer.analyze(draft), compact: compact)
+            InspirationInsightRow(analysis: inspirationAnalysis, compact: compact)
 
             ZStack(alignment: .topLeading) {
                 if draft.isEmpty {
@@ -3007,11 +3303,7 @@ struct NotebookPanel: View {
                     .background(Color.clear)
                     .frame(minHeight: compact ? 128 : 158)
                     .onChange(of: draft) { value in
-                        let limited = String(value.prefix(inspirationCharacterLimit))
-                        if limited != value {
-                            draft = limited
-                        }
-                        noteStore.setNote(limited, for: selectedDate)
+                        updateDraft(value)
                     }
             }
             .padding(8)
@@ -3027,9 +3319,15 @@ struct NotebookPanel: View {
         .animation(.easeInOut(duration: 0.20), value: draft.isEmpty)
         .onAppear {
             draft = noteStore.note(for: selectedDate)
+            inspirationAnalysis = InspirationAnalyzer.analyze(draft)
         }
         .onChange(of: selectedDate) { newDate in
+            noteStore.flushSave()
             draft = noteStore.note(for: newDate)
+            inspirationAnalysis = InspirationAnalyzer.analyze(draft)
+        }
+        .onDisappear {
+            noteStore.flushSave()
         }
     }
 
@@ -3039,6 +3337,25 @@ struct NotebookPanel: View {
 
     private var inspirationMessage: String {
         draft.count >= inspirationCharacterLimit ? "很棒，今日灵感爆棚" : "灵感蓄力中 \(Int(inspirationProgress * 100))% · \(draft.count)/\(inspirationCharacterLimit)"
+    }
+
+    private func updateDraft(_ value: String) {
+        let limited = String(value.prefix(inspirationCharacterLimit))
+        if limited != value {
+            draft = limited
+            return
+        }
+        noteStore.setNote(limited, for: selectedDate)
+        scheduleAnalysis(for: limited)
+    }
+
+    private func scheduleAnalysis(for text: String) {
+        analysisWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            inspirationAnalysis = InspirationAnalyzer.analyze(text)
+        }
+        analysisWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
     }
 }
 
