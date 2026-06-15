@@ -3,6 +3,9 @@ import AppKit
 import UserNotifications
 import UniformTypeIdentifiers
 
+private let inspirationProgressTarget = 300
+private let inspirationCharacterLimit = 2000
+
 enum ReminderFrequency: String, CaseIterable, Codable, Identifiable {
     case once
     case daily
@@ -176,6 +179,10 @@ enum DateKey {
     static func display(from date: Date) -> String {
         displayFormatter.string(from: date)
     }
+
+    static func date(from key: String) -> Date? {
+        keyFormatter.date(from: key)
+    }
 }
 
 final class NoteStore: ObservableObject {
@@ -208,6 +215,10 @@ final class NoteStore: ObservableObject {
         notesByDate[DateKey.string(from: date)] ?? ""
     }
 
+    var noteDates: [Date] {
+        notesByDate.keys.compactMap { DateKey.date(from: $0) }
+    }
+
     func setNote(_ note: String, for date: Date) {
         let key = DateKey.string(from: date)
         let oldValue = notesByDate[key] ?? ""
@@ -218,6 +229,14 @@ final class NoteStore: ObservableObject {
         }
         guard oldValue != note else { return }
         scheduleSave()
+    }
+
+    func appendNote(_ note: String, for date: Date) {
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let existing = self.note(for: date).trimmingCharacters(in: .whitespacesAndNewlines)
+        let merged = existing.isEmpty ? trimmed : existing + "\n" + trimmed
+        setNote(merged, for: date)
     }
 
     func hasNote(on date: Date) -> Bool {
@@ -257,6 +276,26 @@ final class NoteStore: ObservableObject {
 }
 
 enum NoteExporter {
+    static func exportDocx(capsule: DailyCapsule) {
+        guard let destination = saveURL(extensionName: "docx", date: capsule.date) else { return }
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("daily-capsule-\(UUID().uuidString).html")
+        let html = htmlDocument(capsule: capsule)
+        do {
+            try html.write(to: temp, atomically: true, encoding: .utf8)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/textutil")
+            process.arguments = ["-convert", "docx", "-output", destination.path, temp.path]
+            try process.run()
+            process.waitUntilExit()
+            try? FileManager.default.removeItem(at: temp)
+            if process.terminationStatus != 0 {
+                NSSound.beep()
+            }
+        } catch {
+            NSSound.beep()
+        }
+    }
+
     static func exportDocx(note: String, date: Date) {
         guard let destination = saveURL(extensionName: "docx", date: date) else { return }
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent("daily-note-\(UUID().uuidString).html")
@@ -280,6 +319,17 @@ enum NoteExporter {
     static func exportPDF(note: String, date: Date) {
         guard let destination = saveURL(extensionName: "pdf", date: date) else { return }
         let view = NotePDFView(dateTitle: DateKey.display(from: date), note: note)
+        let data = view.dataWithPDF(inside: view.bounds)
+        do {
+            try data.write(to: destination, options: [.atomic])
+        } catch {
+            NSSound.beep()
+        }
+    }
+
+    static func exportPDF(capsule: DailyCapsule) {
+        guard let destination = saveURL(extensionName: "pdf", date: capsule.date) else { return }
+        let view = NotePDFView(dateTitle: capsule.displayDate, note: plainText(capsule: capsule))
         let data = view.dataWithPDF(inside: view.bounds)
         do {
             try data.write(to: destination, options: [.atomic])
@@ -318,6 +368,71 @@ enum NoteExporter {
         </body>
         </html>
         """
+    }
+
+    private static func htmlDocument(capsule: DailyCapsule) -> String {
+        let keywordText = capsule.keywords.isEmpty ? "暂无关键词" : capsule.keywords.joined(separator: "、")
+        let reminders = capsule.reminders.isEmpty
+            ? "<li>暂无事项</li>"
+            : capsule.reminders.map { item in
+                let state = item.isDone ? "已完成" : "未完成"
+                return "<li><strong>\(escape(state))</strong> · \(escape(item.title)) · \(escape(timeText(item.remindAt)))</li>"
+            }.joined(separator: "\n")
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif; line-height: 1.65; color: #1f1f24; }
+            h1 { font-size: 24px; margin-bottom: 4px; }
+            h2 { font-size: 17px; margin-top: 24px; }
+            .date, .meta { color: #666; margin-bottom: 12px; }
+            .summary { padding: 14px 16px; border-radius: 14px; background: #f3f6fb; margin: 18px 0; }
+            .note { white-space: pre-wrap; font-size: 15px; }
+          </style>
+        </head>
+        <body>
+          <h1>灵栖胶囊 Capsule</h1>
+          <div class="date">\(escape(capsule.displayDate)) · \(escape(capsule.status.title)) · \(escape(capsule.weatherText))</div>
+          <div class="summary">\(escape(capsule.summary))</div>
+          <div class="meta">关键词：\(escape(keywordText))</div>
+          <div class="meta">心情：\(escape(capsule.mood)) · 完成情况：\(escape(capsule.completionText))</div>
+          <h2>今日灵感胶囊</h2>
+          <div class="note">\(escape(capsule.noteText.isEmpty ? "这一天还没有记录。" : capsule.noteText))</div>
+          <h2>提醒事项</h2>
+          <ul>\(reminders)</ul>
+        </body>
+        </html>
+        """
+    }
+
+    private static func plainText(capsule: DailyCapsule) -> String {
+        let keywordText = capsule.keywords.isEmpty ? "暂无关键词" : capsule.keywords.joined(separator: "、")
+        let reminderText = capsule.reminders.isEmpty ? "暂无事项" : capsule.reminders.map { item in
+            "\(item.isDone ? "已完成" : "未完成") · \(timeText(item.remindAt)) · \(item.title)"
+        }.joined(separator: "\n")
+        return """
+        \(capsule.summary)
+
+        状态：\(capsule.status.title)
+        天气：\(capsule.weatherText)
+        心情：\(capsule.mood)
+        关键词：\(keywordText)
+        完成情况：\(capsule.completionText)
+
+        今日灵感胶囊
+        \(capsule.noteText.isEmpty ? "这一天还没有记录。" : capsule.noteText)
+
+        提醒事项
+        \(reminderText)
+        """
+    }
+
+    private static func timeText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
     }
 
     private static func escape(_ value: String) -> String {
@@ -895,8 +1010,6 @@ struct ThemePalette {
     var blue: Color { accent2 }
     var lavender: Color { glowB }
 }
-
-private let inspirationCharacterLimit = 300
 
 enum PerformanceTuning {
     static var prefersReducedEffects: Bool {
@@ -1733,7 +1846,7 @@ struct MenuBarQuickPanel: View {
                         .foregroundStyle(theme.palette.text)
                     Text(inspirationMessage)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(inspirationDraft.count >= inspirationCharacterLimit ? theme.palette.warm : theme.palette.cyan)
+                        .foregroundStyle(inspirationDraft.count >= inspirationProgressTarget ? theme.palette.warm : theme.palette.cyan)
                 }
                 Spacer()
                 Button {
@@ -1778,6 +1891,17 @@ struct MenuBarQuickPanel: View {
 
             HStack(spacing: 10) {
                 Button {
+                    saveInspiration()
+                } label: {
+                    Label("保存灵感", systemImage: "tray.and.arrow.down.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .noWrap()
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(inspirationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .opacity(inspirationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.5 : 1)
+
+                Button {
                     startRestMode()
                 } label: {
                     Label("休鼾模式", systemImage: "moon.zzz.fill")
@@ -1789,11 +1913,10 @@ struct MenuBarQuickPanel: View {
                 Button {
                     openMainWindow()
                 } label: {
-                    Label("打开主页面", systemImage: "arrow.up.forward.app")
-                        .font(.system(size: 12, weight: .bold))
-                        .noWrap()
+                    Image(systemName: "arrow.up.forward.app")
                 }
-                .buttonStyle(SecondaryButtonStyle())
+                .buttonStyle(IconButtonStyle())
+                .help("打开主页面")
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -1845,7 +1968,7 @@ struct MenuBarQuickPanel: View {
             LinearGradient(colors: [theme.palette.ink, theme.palette.plum], startPoint: .topLeading, endPoint: .bottomTrailing)
         )
         .onAppear {
-            inspirationDraft = noteStore.note(for: Date())
+            inspirationDraft = ""
             inspirationAnalysis = InspirationAnalyzer.analyze(inspirationDraft)
         }
         .onDisappear {
@@ -1863,11 +1986,11 @@ struct MenuBarQuickPanel: View {
     }
 
     private var inspirationProgress: Double {
-        min(Double(inspirationDraft.count) / Double(inspirationCharacterLimit), 1.0)
+        min(Double(inspirationDraft.count) / Double(inspirationProgressTarget), 1.0)
     }
 
     private var inspirationMessage: String {
-        inspirationDraft.count >= inspirationCharacterLimit ? "很棒，今日灵感爆棚" : "灵感蓄力中 \(Int(inspirationProgress * 100))% · \(inspirationDraft.count)/\(inspirationCharacterLimit)"
+        inspirationDraft.count >= inspirationProgressTarget ? "很棒，今日灵感爆棚" : "灵感蓄力中 \(Int(inspirationProgress * 100))% · \(inspirationDraft.count)/\(inspirationProgressTarget)"
     }
 
     private func openMainWindow() {
@@ -1887,8 +2010,15 @@ struct MenuBarQuickPanel: View {
             inspirationDraft = limited
             return
         }
-        noteStore.setNote(limited, for: Date())
         scheduleAnalysis(for: limited)
+    }
+
+    private func saveInspiration() {
+        let trimmed = inspirationDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        noteStore.appendNote(trimmed, for: Date())
+        inspirationDraft = ""
+        inspirationAnalysis = InspirationAnalyzer.analyze("")
     }
 
     private func scheduleAnalysis(for text: String) {
@@ -1915,6 +2045,7 @@ struct ContentView: View {
     @State private var showingEditor = false
     @State private var editingItem: ReminderItem?
     @State private var showingIconSettings = false
+    @State private var showingHistory = false
     @State private var showingDailyGreeting = false
     @State private var greeting = EmotionalCopy.greetings.randomElement() ?? EmotionalCopy.greetings[0]
     @AppStorage("lastDailyGreetingDate") private var lastDailyGreetingDate = ""
@@ -1930,7 +2061,7 @@ struct ContentView: View {
             ZStack {
                 AnimatedGlowBackground(theme: theme)
                 HStack(spacing: 0) {
-                    Sidebar(selectedDate: $selectedDate, showingEditor: $showingEditor, selectedThemeRaw: $selectedThemeRaw, compact: compact) {
+                    Sidebar(selectedDate: $selectedDate, showingEditor: $showingEditor, showingHistory: $showingHistory, selectedThemeRaw: $selectedThemeRaw, compact: compact) {
                         RestWindowManager.shared.show(theme: theme) {
                             RestWindowManager.shared.close()
                         }
@@ -1939,8 +2070,14 @@ struct ContentView: View {
                     Rectangle()
                         .fill(theme.palette.line)
                         .frame(width: 1)
-                    DayDetail(selectedDate: $selectedDate, showingEditor: $showingEditor, editingItem: $editingItem, compact: compact)
-                        .frame(minWidth: 0, maxWidth: .infinity)
+                    Group {
+                        if showingHistory {
+                            HistoryCapsulesView(selectedDate: $selectedDate, showingHistory: $showingHistory, compact: compact)
+                        } else {
+                            DayDetail(selectedDate: $selectedDate, showingEditor: $showingEditor, editingItem: $editingItem, compact: compact)
+                        }
+                    }
+                    .frame(minWidth: 0, maxWidth: .infinity)
                 }
                 .padding(innerPadding)
                 .glassPanel(radius: 26)
@@ -2024,6 +2161,7 @@ struct Sidebar: View {
     @Environment(\.appTheme) private var theme
     @Binding var selectedDate: Date
     @Binding var showingEditor: Bool
+    @Binding var showingHistory: Bool
     @Binding var selectedThemeRaw: String
     let compact: Bool
     let onStartRestMode: () -> Void
@@ -2049,8 +2187,20 @@ struct Sidebar: View {
                 SidebarQuickActionRow(
                     compact: compact,
                     onRest: onStartRestMode,
-                    onToday: { selectedDate = Date() },
-                    onNewItem: { showingEditor = true }
+                    onToday: {
+                        selectedDate = Date()
+                        showingHistory = false
+                    },
+                    onNewItem: {
+                        showingHistory = false
+                        showingEditor = true
+                    }
+                )
+
+                SidebarHistoryButton(
+                    isActive: showingHistory,
+                    compact: compact,
+                    action: { showingHistory = true }
                 )
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -2269,6 +2419,48 @@ struct CalendarLegendDot: View {
                 .foregroundStyle(Color.white.opacity(0.58))
                 .noWrap(scale: 0.8)
         }
+    }
+}
+
+struct SidebarHistoryButton: View {
+    @Environment(\.appTheme) private var theme
+    let isActive: Bool
+    let compact: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: isActive ? "archivebox.fill" : "archivebox")
+                    .font(.system(size: compact ? 14 : 16, weight: .bold))
+                    .foregroundStyle(theme.palette.cyan)
+                    .frame(width: 34, height: 34)
+                    .background(theme.palette.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("历史胶囊")
+                        .font(.system(size: compact ? 13 : 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                        .noWrap()
+                    Text("回看每日灵感、事项与总结")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                        .noWrap(scale: 0.68)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(theme.palette.muted)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .glassPanel(radius: 17, active: isActive || isHovering)
+            .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovering ? 1.012 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isHovering)
+        .onHover { isHovering = $0 }
     }
 }
 
@@ -2500,6 +2692,141 @@ struct InspirationAnalysis {
     let keywords: [String]
     let mood: String
     let moodSymbol: String
+}
+
+enum CapsuleStatus: String, CaseIterable {
+    case empty
+    case inspiration
+    case action
+    case highEnergy
+
+    var title: String {
+        switch self {
+        case .empty: return "空胶囊"
+        case .inspiration: return "灵感胶囊"
+        case .action: return "行动胶囊"
+        case .highEnergy: return "高能胶囊"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .empty: return "moon.stars.fill"
+        case .inspiration: return "sparkles"
+        case .action: return "checklist.checked"
+        case .highEnergy: return "bolt.fill"
+        }
+    }
+}
+
+struct DailyCapsule: Identifiable, Equatable {
+    var id: String { dateKey }
+    let date: Date
+    let dateKey: String
+    let displayDate: String
+    let noteText: String
+    let summary: String
+    let keywords: [String]
+    let mood: String
+    let moodSymbol: String
+    let weatherText: String
+    let reminders: [ReminderItem]
+    let completedCount: Int
+    let status: CapsuleStatus
+
+    var hasContent: Bool {
+        !noteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !reminders.isEmpty
+    }
+
+    var completionText: String {
+        reminders.isEmpty ? "暂无事项" : "\(completedCount)/\(reminders.count) 已完成"
+    }
+
+    var excerpt: String {
+        let trimmed = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "这一天还没有写下灵感。" }
+        if trimmed.count <= 54 { return trimmed }
+        return String(trimmed.prefix(54)) + "..."
+    }
+}
+
+enum SummaryService {
+    static func summary(note: String, analysis: InspirationAnalysis, reminders: [ReminderItem]) -> String {
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let completed = reminders.filter { $0.isDone }.count
+        let total = reminders.count
+        let keywordText = analysis.keywords.prefix(3).joined(separator: "、")
+
+        if trimmed.isEmpty && reminders.isEmpty {
+            return "今天还没有形成胶囊，写下一点灵感或安排一件小事就会被点亮。"
+        }
+        if trimmed.isEmpty {
+            return total == completed && total > 0 ? "今天的事项已经完成，行动感很稳。" : "今天围绕事项推进中，可以补一段灵感让复盘更完整。"
+        }
+        if total > 0, completed == total {
+            return keywordText.isEmpty ? "今天记录清晰，事项也已收束完成。" : "今天围绕\(keywordText)展开记录，事项也已收束完成。"
+        }
+        if total > 0 {
+            return keywordText.isEmpty ? "今天留下了灵感记录，并推进了 \(completed)/\(total) 项事项。" : "今天的关键词是\(keywordText)，同时推进了 \(completed)/\(total) 项事项。"
+        }
+        if !keywordText.isEmpty {
+            return "今天的灵感集中在\(keywordText)，适合之后继续回看和展开。"
+        }
+        return "今天留下了一段完整记录，已经被收进历史胶囊。"
+    }
+}
+
+enum DailyCapsuleService {
+    static func capsule(on date: Date, noteStore: NoteStore, reminderStore: ReminderStore, weatherInfo: WeatherInfo?) -> DailyCapsule {
+        let note = noteStore.note(for: date)
+        let reminders = reminderStore.items(on: date)
+        let analysis = InspirationAnalyzer.analyze(note)
+        let completed = reminders.filter { $0.isDone }.count
+        let weatherText: String
+        if Calendar.current.isDateInToday(date), let weatherInfo {
+            weatherText = "\(weatherInfo.city) \(Int(weatherInfo.temperature.rounded()))°C · \(weatherInfo.summary)"
+        } else {
+            weatherText = "未记录"
+        }
+        let status = status(for: note, reminders: reminders, completedCount: completed)
+        return DailyCapsule(
+            date: date,
+            dateKey: DateKey.string(from: date),
+            displayDate: DateKey.display(from: date),
+            noteText: note,
+            summary: SummaryService.summary(note: note, analysis: analysis, reminders: reminders),
+            keywords: analysis.keywords,
+            mood: analysis.mood,
+            moodSymbol: analysis.moodSymbol,
+            weatherText: weatherText,
+            reminders: reminders,
+            completedCount: completed,
+            status: status
+        )
+    }
+
+    static func historyCapsules(noteStore: NoteStore, reminderStore: ReminderStore, weatherInfo: WeatherInfo?) -> [DailyCapsule] {
+        let noteDates = noteStore.noteDates
+        let reminderDates = reminderStore.items.map(\.date)
+        let keys = Set((noteDates + reminderDates).map { DateKey.string(from: $0) })
+        return keys
+            .compactMap { DateKey.date(from: $0) }
+            .sorted(by: >)
+            .map { capsule(on: $0, noteStore: noteStore, reminderStore: reminderStore, weatherInfo: weatherInfo) }
+            .filter(\.hasContent)
+    }
+
+    private static func status(for note: String, reminders: [ReminderItem], completedCount: Int) -> CapsuleStatus {
+        let hasNote = !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasNote || !reminders.isEmpty else { return .empty }
+        if note.count >= inspirationProgressTarget && (!reminders.isEmpty && completedCount == reminders.count) {
+            return .highEnergy
+        }
+        if !reminders.isEmpty {
+            return .action
+        }
+        return .inspiration
+    }
 }
 
 enum InspirationAnalyzer {
@@ -3475,6 +3802,10 @@ struct DayDetail: View {
 
                 StatusGrid(items: store.items(on: selectedDate), compact: compact)
 
+                SummaryCard(capsule: capsule, compact: compact) {
+                    copySummary()
+                }
+
                 NotebookPanel(selectedDate: selectedDate, compact: compact)
 
                 let items = store.items(on: selectedDate)
@@ -3528,6 +3859,23 @@ struct DayDetail: View {
         return formatter.string(from: selectedDate)
     }
 
+    private var capsule: DailyCapsule {
+        DailyCapsuleService.capsule(on: selectedDate, noteStore: noteStore, reminderStore: store, weatherInfo: weatherStore.info)
+    }
+
+    private func copySummary() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(capsule.summary, forType: .string)
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+            toastMessage = "今日总结已复制，可以直接贴到复盘或周报里。"
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            withAnimation(.easeOut(duration: 0.22)) {
+                toastMessage = nil
+            }
+        }
+    }
+
     private func showToast(for item: ReminderItem) {
         let messages = [
             "完成了「\(item.title)」，今天又多了一点确定感。",
@@ -3546,8 +3894,303 @@ struct DayDetail: View {
     }
 }
 
+struct SummaryCard: View {
+    @Environment(\.appTheme) private var theme
+    let capsule: DailyCapsule
+    let compact: Bool
+    let onCopy: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: compact ? 10 : 14) {
+            Image(systemName: capsule.status.symbol)
+                .font(.system(size: compact ? 18 : 20, weight: .bold))
+                .foregroundStyle(theme.palette.warm)
+                .frame(width: compact ? 38 : 44, height: compact ? 38 : 44)
+                .background(theme.palette.warm.opacity(0.14), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("今日总结")
+                        .font(.system(size: compact ? 15 : 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                        .noWrap()
+                    Text(capsule.status.title)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(theme.palette.cyan)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(theme.palette.cyan.opacity(0.12), in: Capsule())
+                    Spacer()
+                    Button(action: onCopy) {
+                        Label("复制", systemImage: "doc.on.doc")
+                            .font(.system(size: 12, weight: .bold))
+                            .noWrap()
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                }
+                Text(capsule.summary)
+                    .font(.system(size: compact ? 13 : 14, weight: .medium))
+                    .foregroundStyle(theme.palette.text)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Label(capsule.mood, systemImage: capsule.moodSymbol)
+                    Label(capsule.completionText, systemImage: "checkmark.circle")
+                    Label(capsule.weatherText, systemImage: "cloud.sun.fill")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.palette.muted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            }
+            .layoutPriority(1)
+        }
+        .padding(compact ? 13 : 16)
+        .glassPanel(radius: 19, active: capsule.hasContent)
+        .hoverLift()
+    }
+}
+
+struct HistoryCapsulesView: View {
+    @EnvironmentObject private var noteStore: NoteStore
+    @EnvironmentObject private var reminderStore: ReminderStore
+    @EnvironmentObject private var weatherStore: WeatherStore
+    @Environment(\.appTheme) private var theme
+    @Binding var selectedDate: Date
+    @Binding var showingHistory: Bool
+    let compact: Bool
+    @State private var detailCapsule: DailyCapsule?
+
+    private var capsules: [DailyCapsule] {
+        DailyCapsuleService.historyCapsules(noteStore: noteStore, reminderStore: reminderStore, weatherInfo: weatherStore.info)
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: compact ? 14 : 18) {
+                header
+                if let detailCapsule {
+                    CapsuleDetailPanel(capsule: detailCapsule, compact: compact) {
+                        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                            self.detailCapsule = nil
+                        }
+                    }
+                } else if capsules.isEmpty {
+                    historyEmpty
+                } else {
+                    LazyVStack(spacing: 12) {
+                        ForEach(capsules) { capsule in
+                            CapsuleHistoryCard(capsule: capsule, compact: compact) {
+                                withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                    detailCapsule = capsule
+                                    selectedDate = capsule.date
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, compact ? 20 : 32)
+            .padding(.bottom, 24)
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(detailCapsule == nil ? "历史胶囊" : "胶囊详情")
+                    .font(.system(size: compact ? 28 : 34, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                    .noWrap()
+                Text("按日期回看灵感、事项、心情和当天总结。")
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.palette.muted)
+                    .noWrap(scale: 0.7)
+            }
+            Spacer()
+            Button {
+                withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                    showingHistory = false
+                    detailCapsule = nil
+                }
+            } label: {
+                Label("回到今天", systemImage: "calendar")
+                    .font(.system(size: 12, weight: .bold))
+                    .noWrap()
+            }
+            .buttonStyle(SecondaryButtonStyle())
+        }
+        .padding(.top, compact ? 16 : 24)
+    }
+
+    private var historyEmpty: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "archivebox")
+                .font(.system(size: 42, weight: .light))
+                .foregroundStyle(theme.palette.cyan)
+            Text("还没有历史胶囊")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.palette.text)
+            Text("写下一段今日灵感，或添加一个提醒事项，胶囊就会自动生成。")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(theme.palette.muted)
+                .multilineTextAlignment(.center)
+            Button {
+                showingHistory = false
+                selectedDate = Date()
+            } label: {
+                Label("去记录今天", systemImage: "sparkles")
+                    .font(.system(size: 13, weight: .bold))
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .frame(width: 160)
+        }
+        .frame(maxWidth: .infinity, minHeight: compact ? 320 : 420)
+        .glassPanel(radius: 24)
+    }
+}
+
+struct CapsuleHistoryCard: View {
+    @Environment(\.appTheme) private var theme
+    let capsule: DailyCapsule
+    let compact: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: compact ? 10 : 14) {
+                Image(systemName: capsule.status.symbol)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(theme.palette.cyan)
+                    .frame(width: 42, height: 42)
+                    .background(theme.palette.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(capsule.displayDate)
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                            .noWrap()
+                        Text(capsule.status.title)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.palette.warm)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(theme.palette.warm.opacity(0.12), in: Capsule())
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                    }
+                    Text(capsule.summary)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.palette.text)
+                        .lineLimit(2)
+                    Text(capsule.excerpt)
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.palette.muted)
+                        .lineLimit(2)
+                }
+                .layoutPriority(1)
+            }
+            .padding(15)
+            .glassPanel(radius: 18, active: isHovering)
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isHovering ? 1.008 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.84), value: isHovering)
+        .onHover { isHovering = $0 }
+    }
+}
+
+struct CapsuleDetailPanel: View {
+    @Environment(\.appTheme) private var theme
+    let capsule: DailyCapsule
+    let compact: Bool
+    let onBack: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Button(action: onBack) {
+                    Label("返回列表", systemImage: "chevron.left")
+                        .font(.system(size: 12, weight: .bold))
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                Spacer()
+                Button {
+                    NoteExporter.exportDocx(capsule: capsule)
+                } label: {
+                    Label("Word", systemImage: "doc.richtext")
+                        .font(.system(size: 12, weight: .bold))
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                Button {
+                    NoteExporter.exportPDF(capsule: capsule)
+                } label: {
+                    Label("PDF", systemImage: "doc.fill")
+                        .font(.system(size: 12, weight: .bold))
+                }
+                .buttonStyle(PrimaryButtonStyle())
+            }
+
+            SummaryCard(capsule: capsule, compact: compact) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(capsule.summary, forType: .string)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("灵感原文", systemImage: "text.alignleft")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                Text(capsule.noteText.isEmpty ? "这一天还没有记录。" : capsule.noteText)
+                    .font(.system(size: 14))
+                    .foregroundStyle(theme.palette.text)
+                    .textSelection(.enabled)
+                    .lineSpacing(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(theme.palette.ink.opacity(0.22), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(16)
+            .glassPanel(radius: 20)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("提醒事项", systemImage: "checklist")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                if capsule.reminders.isEmpty {
+                    Text("暂无事项")
+                        .font(.system(size: 13))
+                        .foregroundStyle(theme.palette.muted)
+                } else {
+                    ForEach(capsule.reminders) { item in
+                        HStack {
+                            Image(systemName: item.isDone ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(item.isDone ? theme.palette.cyan : theme.palette.muted)
+                            Text(item.title)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(theme.palette.text)
+                            Spacer()
+                            Text(item.frequency.title)
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(theme.palette.muted)
+                        }
+                        .padding(10)
+                        .background(theme.palette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                }
+            }
+            .padding(16)
+            .glassPanel(radius: 20)
+        }
+    }
+}
+
 struct NotebookPanel: View {
     @EnvironmentObject private var noteStore: NoteStore
+    @EnvironmentObject private var reminderStore: ReminderStore
+    @EnvironmentObject private var weatherStore: WeatherStore
     @Environment(\.appTheme) private var theme
     let selectedDate: Date
     let compact: Bool
@@ -3566,12 +4209,12 @@ struct NotebookPanel: View {
                         .noWrap()
                     Text(inspirationMessage)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(draft.count >= inspirationCharacterLimit ? theme.palette.warm : theme.palette.cyan)
+                        .foregroundStyle(draft.count >= inspirationProgressTarget ? theme.palette.warm : theme.palette.cyan)
                         .noWrap(scale: 0.72)
                 }
                 Spacer()
                 Button {
-                    NoteExporter.exportDocx(note: draft, date: selectedDate)
+                    NoteExporter.exportDocx(capsule: capsule)
                 } label: {
                     Label("Word", systemImage: "doc.richtext")
                         .font(.system(size: 12, weight: .bold))
@@ -3582,7 +4225,7 @@ struct NotebookPanel: View {
                 .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.48 : 1)
 
                 Button {
-                    NoteExporter.exportPDF(note: draft, date: selectedDate)
+                    NoteExporter.exportPDF(capsule: capsule)
                 } label: {
                     Label("PDF", systemImage: "doc.fill")
                         .font(.system(size: 12, weight: .bold))
@@ -3641,11 +4284,15 @@ struct NotebookPanel: View {
     }
 
     private var inspirationProgress: Double {
-        min(Double(draft.count) / Double(inspirationCharacterLimit), 1.0)
+        min(Double(draft.count) / Double(inspirationProgressTarget), 1.0)
     }
 
     private var inspirationMessage: String {
-        draft.count >= inspirationCharacterLimit ? "很棒，今日灵感爆棚" : "灵感蓄力中 \(Int(inspirationProgress * 100))% · \(draft.count)/\(inspirationCharacterLimit)"
+        draft.count >= inspirationProgressTarget ? "很棒，今日灵感爆棚" : "灵感蓄力中 \(Int(inspirationProgress * 100))% · \(draft.count)/\(inspirationProgressTarget)"
+    }
+
+    private var capsule: DailyCapsule {
+        DailyCapsuleService.capsule(on: selectedDate, noteStore: noteStore, reminderStore: reminderStore, weatherInfo: weatherStore.info)
     }
 
     private func updateDraft(_ value: String) {
