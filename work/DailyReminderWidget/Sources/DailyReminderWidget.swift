@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 private let inspirationProgressTarget = 300
 private let inspirationCharacterLimit = 2000
 private let quickInspirationCharacterLimit = 200
+private let defaultWindowSize = NSSize(width: 1291, height: 893)
 
 enum QuickPanelRoute: String {
     case today
@@ -1017,10 +1018,10 @@ struct DailyReminderWidgetApp: App {
                 .environmentObject(noteStore)
                 .environmentObject(iconManager)
                 .environmentObject(weatherStore)
-                .frame(minWidth: 900, minHeight: 560)
+                .frame(minWidth: defaultWindowSize.width, minHeight: defaultWindowSize.height)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1180, height: 760)
+        .defaultSize(width: defaultWindowSize.width, height: defaultWindowSize.height)
         .commands {
             CommandGroup(replacing: .newItem) { }
         }
@@ -1043,9 +1044,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for window in NSApplication.shared.windows {
             window.title = "灵栖胶囊Capsule"
             window.isMovableByWindowBackground = true
-            window.minSize = NSSize(width: 900, height: 560)
-            if window.frame.width < 1100 || window.frame.height < 720 {
-                window.setFrame(NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: 1180, height: 760), display: true)
+            window.minSize = defaultWindowSize
+            if window.frame.width < defaultWindowSize.width || window.frame.height < defaultWindowSize.height {
+                window.setFrame(NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: defaultWindowSize.width, height: defaultWindowSize.height), display: true)
                 window.center()
             }
         }
@@ -4429,6 +4430,10 @@ struct DayDetail: View {
                     onEdit: { item in
                         editingItem = item
                         showingEditor = true
+                    },
+                    onDelete: { item in
+                        store.delete(item)
+                        showToast("已删除「\(item.title)」。")
                     }
                 )
                 .padding(.bottom, 28)
@@ -4820,6 +4825,7 @@ struct TodayActionPanel: View {
     let onAdd: () -> Void
     let onToggle: (ReminderItem) -> Void
     let onEdit: (ReminderItem) -> Void
+    let onDelete: (ReminderItem) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -4866,7 +4872,12 @@ struct TodayActionPanel: View {
             } else {
                 LazyVGrid(columns: gridColumns, spacing: 10) {
                     ForEach(items.prefix(5)) { item in
-                        CompactReminderRow(item: item, onToggle: { onToggle(item) }, onEdit: { onEdit(item) })
+                        CompactReminderRow(
+                            item: item,
+                            onToggle: { onToggle(item) },
+                            onEdit: { onEdit(item) },
+                            onDelete: { onDelete(item) }
+                        )
                     }
                 }
                 if items.count > 5 {
@@ -4895,9 +4906,10 @@ struct CompactReminderRow: View {
     let item: ReminderItem
     let onToggle: () -> Void
     let onEdit: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 11) {
+        HStack(spacing: 10) {
             Button(action: onToggle) {
                 Image(systemName: item.isDone ? "checkmark.square.fill" : "square")
                     .font(.system(size: 18, weight: .semibold))
@@ -4911,14 +4923,20 @@ struct CompactReminderRow: View {
                         .foregroundStyle(item.isDone ? theme.palette.muted : theme.palette.text)
                         .strikethrough(item.isDone, color: theme.palette.muted)
                         .noWrap(scale: 0.72)
-                    Spacer()
-                    Text(timeText)
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(theme.palette.muted)
-                        .noWrap(scale: 0.8)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
+            .layoutPriority(1)
+            Text(timeText)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(theme.palette.muted)
+                .noWrap(scale: 0.8)
+                .frame(width: 42, alignment: .trailing)
+            ReminderRowIconButton(symbol: "pencil", tint: theme.palette.accent, action: onEdit)
+                .help("编辑事项")
+            ReminderRowIconButton(symbol: "trash", tint: theme.palette.warm, action: onDelete)
+                .help("删除事项")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 13)
@@ -4934,6 +4952,29 @@ struct CompactReminderRow: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         return formatter.string(from: item.remindAt)
+    }
+}
+
+struct ReminderRowIconButton: View {
+    @Environment(\.appTheme) private var theme
+    let symbol: String
+    let tint: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(tint.opacity(0.90))
+                .frame(width: 26, height: 26)
+                .background(theme.palette.cardStrong.opacity(0.72), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(theme.palette.line.opacity(0.82), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(1)
     }
 }
 
