@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT_ROOT="$ROOT/../../outputs"
 APP_NAME="灵栖胶囊Capsule"
 BUNDLE_ID="local.codex.lingqi-capsule"
-APP_VERSION="1.2.0"
-APP_BUILD="6"
+APP_VERSION="1.2.3"
+APP_BUILD="9"
 APP="$OUT_ROOT/$APP_NAME.app"
 DMG_ROOT="$ROOT/dmgroot"
 CONTENTS="$APP/Contents"
@@ -81,6 +81,9 @@ if [[ -f "$NOTIFICATION_ICON" ]]; then
 fi
 if [[ -f "$DEFAULT_ICON" ]]; then
   cp "$DEFAULT_ICON" "$RESOURCES/AppIcon.png"
+fi
+if [[ -f "$ROOT/Assets/InspirationPlantCapsule.png" ]]; then
+  cp "$ROOT/Assets/InspirationPlantCapsule.png" "$RESOURCES/InspirationPlantCapsule.png"
 fi
 for BACKGROUND in "$ROOT"/Assets/ImmersiveVistaBackground*.jpg; do
   if [[ -f "$BACKGROUND" ]]; then

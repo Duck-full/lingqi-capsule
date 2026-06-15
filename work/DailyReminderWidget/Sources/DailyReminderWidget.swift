@@ -5,6 +5,20 @@ import UniformTypeIdentifiers
 
 private let inspirationProgressTarget = 300
 private let inspirationCharacterLimit = 2000
+private let quickInspirationCharacterLimit = 200
+
+enum QuickPanelRoute: String {
+    case today
+    case summary
+    case history
+    case theme
+    case settings
+}
+
+extension Notification.Name {
+    static let quickPanelRouteRequested = Notification.Name("local.codex.lingqi.quickPanelRouteRequested")
+    static let quickInspirationSaved = Notification.Name("local.codex.lingqi.quickInspirationSaved")
+}
 
 enum ReminderFrequency: String, CaseIterable, Codable, Identifiable {
     case once
@@ -239,6 +253,25 @@ final class NoteStore: ObservableObject {
         setNote(merged, for: date)
     }
 
+    func recentInspirations(limit: Int = 3) -> [RecentInspiration] {
+        notesByDate
+            .compactMap { key, note -> (Date, String)? in
+                guard let date = DateKey.date(from: key) else { return nil }
+                return (date, note)
+            }
+            .sorted { $0.0 > $1.0 }
+            .flatMap { date, note in
+                note
+                    .components(separatedBy: .newlines)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .reversed()
+                    .map { RecentInspiration(text: $0, date: Calendar.current.isDateInToday(date) ? Date() : date) }
+            }
+            .prefix(limit)
+            .map { $0 }
+    }
+
     func hasNote(on date: Date) -> Bool {
         !note(for: date).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -272,6 +305,36 @@ final class NoteStore: ObservableObject {
     private static func write(_ notes: [String: String], to fileURL: URL) {
         guard let data = try? JSONEncoder().encode(notes) else { return }
         try? data.write(to: fileURL, options: [.atomic])
+    }
+}
+
+struct RecentInspiration: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let date: Date
+
+    var displayText: String {
+        if text.count <= 38 { return text }
+        return String(text.prefix(38)) + "..."
+    }
+
+    var countText: String {
+        "\(text.count) 字"
+    }
+
+    var timeText: String {
+        if Calendar.current.isDateInToday(date) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm"
+            return formatter.string(from: date)
+        }
+        if Calendar.current.isDateInYesterday(date) {
+            return "昨天"
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "M月d日"
+        return formatter.string(from: date)
     }
 }
 
@@ -695,12 +758,12 @@ enum AppBackgroundLibrary {
         immersiveBackgroundNames.randomElement() ?? "ImmersiveVistaBackground01"
     }
 
-    static func image(named name: String) -> NSImage? {
-        let key = NSString(string: name)
+    static func image(named name: String, fileExtension: String = "jpg") -> NSImage? {
+        let key = NSString(string: "\(name).\(fileExtension)")
         if let cached = cache.object(forKey: key) {
             return cached
         }
-        guard let url = Bundle.main.url(forResource: name, withExtension: "jpg") else { return nil }
+        guard let url = Bundle.main.url(forResource: name, withExtension: fileExtension) else { return nil }
         guard let image = NSImage(contentsOf: url) else { return nil }
         cache.setObject(image, forKey: key)
         return image
@@ -962,10 +1025,11 @@ struct DailyReminderWidgetApp: App {
             CommandGroup(replacing: .newItem) { }
         }
 
-        MenuBarExtra("灵栖胶囊Capsule", systemImage: "checklist") {
+        MenuBarExtra("灵栖胶囊Capsule", systemImage: "leaf.fill") {
             MenuBarQuickPanel()
                 .environmentObject(store)
                 .environmentObject(noteStore)
+                .environmentObject(weatherStore)
                 .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
         }
         .menuBarExtraStyle(.window)
@@ -1831,181 +1895,87 @@ struct ThemeBackgroundIllustration: View {
 struct MenuBarQuickPanel: View {
     @EnvironmentObject private var store: ReminderStore
     @EnvironmentObject private var noteStore: NoteStore
+    @EnvironmentObject private var weatherStore: WeatherStore
     @Environment(\.appTheme) private var theme
     @State private var inspirationDraft = ""
     @State private var inspirationAnalysis = InspirationAnalyzer.analyze("")
     @State private var analysisWorkItem: DispatchWorkItem?
+    @State private var isInputFocused = false
+    @State private var saveFeedback: String?
+    @State private var didSave = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack(spacing: 10) {
-                CartoonPersonBadge(progress: inspirationProgress, compact: true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("今日灵感胶囊")
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.palette.text)
-                    Text(inspirationMessage)
+        ZStack {
+            QuickPanelBackground()
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 16) {
+                    QuickPanelHeader(onRefresh: refreshWeather)
+                    QuickWeatherBadge()
+                    QuickInspirationInputView(
+                        text: $inspirationDraft,
+                        analysis: inspirationAnalysis,
+                        isFocused: $isInputFocused,
+                        feedback: saveFeedback
+                    )
+                    QuickMainActionRow(
+                        canSave: canSave,
+                        didSave: didSave,
+                        onSave: saveInspiration,
+                        onOpen: { openMainWindow(route: .today) }
+                    )
+                    RecentInspirationListView(items: recentInspirations) {
+                        openMainWindow(route: .history)
+                    }
+                    QuickActionGridView { route in
+                        openMainWindow(route: route)
+                    }
+                    Text("愿你的灵感，慢慢发光 ✨")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(inspirationDraft.count >= inspirationProgressTarget ? theme.palette.warm : theme.palette.cyan)
+                        .foregroundStyle(QuickPanelStyle.subText)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 2)
                 }
-                Spacer()
-                Button {
-                    openMainWindow()
-                } label: {
-                    Image(systemName: "arrow.up.forward.app")
-                }
-                .buttonStyle(IconButtonStyle())
-                .help("打开灵栖胶囊Capsule")
-            }
-
-            InspirationInsightRow(analysis: inspirationAnalysis, compact: true)
-
-            ZStack(alignment: .topLeading) {
-                if inspirationDraft.isEmpty {
-                    Text("快来记录今日灵感吧，在这里，你可以畅所欲言。")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(theme.palette.muted.opacity(0.58))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                }
-                TextEditor(text: $inspirationDraft)
-                    .font(.system(size: 14))
-                    .foregroundStyle(theme.palette.text)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.clear)
-                    .frame(height: 112)
-                    .onChange(of: inspirationDraft) { value in
-                        updateDraft(value)
-                    }
-            }
-            .padding(8)
-            .background(theme.palette.ink.opacity(0.28), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(theme.palette.line, lineWidth: 1)
-            )
-
-            InspirationProgressBar(progress: inspirationProgress)
-
-            Divider().opacity(0.28)
-
-            HStack(spacing: 10) {
-                Button {
-                    saveInspiration()
-                } label: {
-                    Label("保存灵感", systemImage: "tray.and.arrow.down.fill")
-                        .font(.system(size: 12, weight: .bold))
-                        .noWrap()
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(inspirationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .opacity(inspirationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.5 : 1)
-
-                Button {
-                    startRestMode()
-                } label: {
-                    Label("休鼾模式", systemImage: "moon.zzz.fill")
-                        .font(.system(size: 12, weight: .bold))
-                        .noWrap()
-                }
-                .buttonStyle(PrimaryButtonStyle())
-
-                Button {
-                    openMainWindow()
-                } label: {
-                    Image(systemName: "arrow.up.forward.app")
-                }
-                .buttonStyle(IconButtonStyle())
-                .help("打开主页面")
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Label("今日待办", systemImage: "checklist")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(theme.palette.muted)
-                    .noWrap()
-            if todayItems.isEmpty {
-                HStack(spacing: 10) {
-                    Image(systemName: "cup.and.saucer.fill")
-                        .foregroundStyle(theme.palette.warm)
-                    Text("今天还没有待办，先留一点呼吸感。")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(theme.palette.muted)
-                }
-                .padding(.vertical, 8)
-            } else {
-                VStack(spacing: 8) {
-                        ForEach(todayItems.prefix(4)) { item in
-                        Button {
-                            openMainWindow()
-                        } label: {
-                            HStack(spacing: 9) {
-                                Image(systemName: item.isDone ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(item.isDone ? theme.palette.accent : theme.palette.muted)
-                                Text(item.title)
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(item.isDone ? theme.palette.muted : theme.palette.text)
-                                    .strikethrough(item.isDone)
-                                    .noWrap(scale: 0.74)
-                                Spacer()
-                                Text(timeText(item))
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(theme.palette.cyan)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .background(theme.palette.cardStrong, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 20)
             }
         }
-        .padding(16)
-        .frame(width: 372)
-        .background(
-            LinearGradient(colors: [theme.palette.ink, theme.palette.plum], startPoint: .topLeading, endPoint: .bottomTrailing)
-        )
+        .frame(width: 404, height: 648)
         .onAppear {
             inspirationDraft = ""
             inspirationAnalysis = InspirationAnalyzer.analyze(inspirationDraft)
+            if weatherStore.info == nil {
+                weatherStore.refresh()
+            }
         }
         .onDisappear {
             noteStore.flushSave()
         }
     }
 
-    private var todayItems: [ReminderItem] {
-        store.items(on: Date())
+    private var recentInspirations: [RecentInspiration] {
+        noteStore.recentInspirations(limit: 3)
     }
 
-    private var summaryText: String {
-        let undone = todayItems.filter { !$0.isDone }.count
-        return undone == 0 ? "没有未完成事项" : "\(undone) 项待处理"
+    private var canSave: Bool {
+        !inspirationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var inspirationProgress: Double {
-        min(Double(inspirationDraft.count) / Double(inspirationProgressTarget), 1.0)
+        min(Double(inspirationDraft.count) / Double(quickInspirationCharacterLimit), 1.0)
     }
 
-    private var inspirationMessage: String {
-        inspirationDraft.count >= inspirationProgressTarget ? "很棒，今日灵感爆棚" : "灵感蓄力中 \(Int(inspirationProgress * 100))% · \(inspirationDraft.count)/\(inspirationProgressTarget)"
-    }
-
-    private func openMainWindow() {
+    private func openMainWindow(route: QuickPanelRoute = .today) {
         NSApp.activate(ignoringOtherApps: true)
         NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+        NotificationCenter.default.post(name: .quickPanelRouteRequested, object: route.rawValue)
     }
 
-    private func startRestMode() {
-        RestWindowManager.shared.show(theme: theme) {
-            RestWindowManager.shared.close()
-        }
+    private func refreshWeather() {
+        weatherStore.refresh()
     }
 
     private func updateDraft(_ value: String) {
-        let limited = String(value.prefix(inspirationCharacterLimit))
+        let limited = String(value.prefix(quickInspirationCharacterLimit))
         if limited != value {
             inspirationDraft = limited
             return
@@ -2019,6 +1989,15 @@ struct MenuBarQuickPanel: View {
         noteStore.appendNote(trimmed, for: Date())
         inspirationDraft = ""
         inspirationAnalysis = InspirationAnalyzer.analyze("")
+        didSave = true
+        saveFeedback = "灵感已被小树苗吸收"
+        NotificationCenter.default.post(name: .quickInspirationSaved, object: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation(.easeOut(duration: 0.18)) {
+                didSave = false
+                saveFeedback = nil
+            }
+        }
     }
 
     private func scheduleAnalysis(for text: String) {
@@ -2030,10 +2009,370 @@ struct MenuBarQuickPanel: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
     }
 
-    private func timeText(_ item: ReminderItem) -> String {
+}
+
+enum QuickPanelStyle {
+    static let backgroundTop = Color(red: 0.055, green: 0.085, blue: 0.135)
+    static let backgroundBottom = Color(red: 0.070, green: 0.095, blue: 0.150)
+    static let card = Color.white.opacity(0.075)
+    static let cardStrong = Color.white.opacity(0.105)
+    static let stroke = Color.white.opacity(0.14)
+    static let strokeActive = Color(red: 0.54, green: 0.70, blue: 1.0).opacity(0.55)
+    static let text = Color(red: 0.972, green: 0.980, blue: 0.988)
+    static let subText = Color(red: 0.58, green: 0.64, blue: 0.72)
+    static let weakText = Color(red: 0.40, green: 0.46, blue: 0.55)
+    static let blue = Color(red: 0.54, green: 0.70, blue: 1.0)
+    static let green = Color(red: 0.65, green: 0.95, blue: 0.82)
+    static let purple = Color(red: 0.75, green: 0.52, blue: 0.99)
+}
+
+struct QuickPanelBackground: View {
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [QuickPanelStyle.backgroundTop, QuickPanelStyle.backgroundBottom], startPoint: .topLeading, endPoint: .bottomTrailing)
+            RadialGradient(colors: [theme.palette.accent.opacity(0.20), .clear], center: .topTrailing, startRadius: 10, endRadius: 320)
+            RadialGradient(colors: [theme.palette.warm.opacity(0.11), .clear], center: .bottomLeading, startRadius: 10, endRadius: 360)
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .opacity(0.18)
+        }
+    }
+}
+
+struct QuickGlassCard<Content: View>: View {
+    let active: Bool
+    let radius: CGFloat
+    let content: Content
+
+    init(active: Bool = false, radius: CGFloat = 16, @ViewBuilder content: () -> Content) {
+        self.active = active
+        self.radius = radius
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .background(QuickPanelStyle.card.opacity(active ? 1.18 : 1), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(active ? QuickPanelStyle.strokeActive : QuickPanelStyle.stroke, lineWidth: active ? 1.2 : 1)
+            )
+            .shadow(color: Color.black.opacity(active ? 0.20 : 0.12), radius: active ? 14 : 9, x: 0, y: 6)
+    }
+}
+
+struct QuickPanelHeader: View {
+    @Environment(\.appTheme) private var theme
+    let onRefresh: () -> Void
+    @State private var hoveringRefresh = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "leaf.fill")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(QuickPanelStyle.green)
+                .frame(width: 32, height: 32)
+                .background(QuickPanelStyle.cardStrong, in: Circle())
+                .overlay(Circle().stroke(QuickPanelStyle.stroke, lineWidth: 1))
+            Text("灵栖胶囊")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(QuickPanelStyle.text)
+            Spacer()
+            Circle()
+                .fill(QuickPanelStyle.green)
+                .frame(width: 7, height: 7)
+            Text("已保存本地")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(QuickPanelStyle.green.opacity(0.88))
+            Button(action: onRefresh) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(hoveringRefresh ? QuickPanelStyle.text : QuickPanelStyle.subText)
+                    .frame(width: 28, height: 28)
+                    .background(hoveringRefresh ? QuickPanelStyle.cardStrong : Color.clear, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hoveringRefresh = $0 }
+            .help("刷新天气")
+        }
+        .frame(height: 40)
+    }
+}
+
+struct QuickWeatherBadge: View {
+    @EnvironmentObject private var weatherStore: WeatherStore
+
+    var body: some View {
+        QuickGlassCard(radius: 16) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(dateText)
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(QuickPanelStyle.text)
+                    Text(weatherText)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(QuickPanelStyle.subText)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: weatherStore.info?.icon ?? "cloud.sun.fill")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(QuickPanelStyle.blue)
+                Text(shortWeatherText)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(QuickPanelStyle.text)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private var dateText: String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: item.remindAt)
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "M月d日 EEEE"
+        return formatter.string(from: Date())
+    }
+
+    private var weatherText: String {
+        guard let info = weatherStore.info else { return weatherStore.message }
+        return "\(info.city) \(Int(info.temperature.rounded()))°C \(info.summary)"
+    }
+
+    private var shortWeatherText: String {
+        guard let info = weatherStore.info else { return "天气" }
+        return "\(Int(info.temperature.rounded()))°C \(info.summary)"
+    }
+}
+
+struct QuickInspirationInputView: View {
+    @Binding var text: String
+    let analysis: InspirationAnalysis
+    @Binding var isFocused: Bool
+    let feedback: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text("快速记录此刻的灵感…")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(QuickPanelStyle.weakText)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 13)
+                }
+                TextEditor(text: $text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(QuickPanelStyle.text)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.clear)
+                    .frame(height: 110)
+                    .onChange(of: text) { value in
+                        let limited = String(value.prefix(quickInspirationCharacterLimit))
+                        if limited != value { text = limited }
+                    }
+            }
+            .padding(8)
+            .background(QuickPanelStyle.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(alignment: .bottomTrailing) {
+                Text("\(text.count) / \(quickInspirationCharacterLimit)")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(text.count >= quickInspirationCharacterLimit ? Color(red: 0.99, green: 0.65, blue: 0.65) : QuickPanelStyle.subText)
+                    .padding(.trailing, 14)
+                    .padding(.bottom, 12)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(text.isEmpty ? QuickPanelStyle.stroke : QuickPanelStyle.strokeActive, lineWidth: text.isEmpty ? 1 : 1.2)
+            )
+
+            HStack(spacing: 7) {
+                if let feedback {
+                    Label(feedback, systemImage: "leaf.fill")
+                        .foregroundStyle(QuickPanelStyle.green)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                } else {
+                    Label(analysis.mood, systemImage: analysis.moodSymbol)
+                        .foregroundStyle(QuickPanelStyle.subText)
+                }
+                Spacer()
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .frame(height: 18)
+            .animation(.easeInOut(duration: 0.18), value: feedback)
+        }
+    }
+}
+
+struct QuickMainActionRow: View {
+    let canSave: Bool
+    let didSave: Bool
+    let onSave: () -> Void
+    let onOpen: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onSave) {
+                HStack(spacing: 8) {
+                    Image(systemName: didSave ? "checkmark.circle.fill" : "tray.and.arrow.down.fill")
+                    Text(didSave ? "已保存" : "保存灵感  ⌘↵")
+                }
+                .font(.system(size: 13, weight: .bold))
+                .frame(maxWidth: .infinity, minHeight: 46)
+            }
+            .buttonStyle(QuickPrimaryButtonStyle())
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(!canSave)
+            .opacity(canSave ? 1 : 0.46)
+
+            Button(action: onOpen) {
+                Text("打开完整胶囊")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(maxWidth: .infinity, minHeight: 46)
+            }
+            .buttonStyle(QuickSecondaryButtonStyle())
+        }
+    }
+}
+
+struct RecentInspirationListView: View {
+    let items: [RecentInspiration]
+    let onViewAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("最近灵感")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(QuickPanelStyle.text)
+                Spacer()
+                Button(action: onViewAll) {
+                    HStack(spacing: 4) {
+                        Text("查看全部")
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(QuickPanelStyle.subText)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if items.isEmpty {
+                QuickGlassCard(radius: 14) {
+                    Text("还没有灵感记录，先写下第一条吧。")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(QuickPanelStyle.subText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(13)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(items.prefix(3)) { item in
+                        QuickGlassCard(radius: 14) {
+                            HStack(alignment: .top, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(item.displayText)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(QuickPanelStyle.text)
+                                        .lineLimit(2)
+                                    Text(item.timeText)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(QuickPanelStyle.weakText)
+                                }
+                                Spacer()
+                                Text(item.countText)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(QuickPanelStyle.weakText)
+                            }
+                            .padding(12)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct QuickActionGridView: View {
+    let action: (QuickPanelRoute) -> Void
+    private let items: [(QuickPanelRoute, String, String)] = [
+        (.summary, "今日总结", "doc.text.magnifyingglass"),
+        (.history, "历史胶囊", "archivebox"),
+        (.theme, "主题换肤", "paintpalette"),
+        (.settings, "设置中心", "gearshape")
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
+            ForEach(items, id: \.0.rawValue) { item in
+                QuickActionTile(title: item.1, systemImage: item.2) {
+                    action(item.0)
+                }
+            }
+        }
+    }
+}
+
+struct QuickActionTile: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(QuickPanelStyle.blue.opacity(hovering ? 1 : 0.78))
+                Text(title)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(QuickPanelStyle.subText)
+                    .noWrap(scale: 0.72)
+            }
+            .frame(maxWidth: .infinity, minHeight: 76)
+            .background(QuickPanelStyle.card.opacity(hovering ? 1.35 : 1), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(hovering ? QuickPanelStyle.strokeActive : QuickPanelStyle.stroke, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(hovering ? 1.02 : 1)
+        .animation(.spring(response: 0.20, dampingFraction: 0.82), value: hovering)
+        .onHover { hovering = $0 }
+    }
+}
+
+struct QuickPrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(Color.white)
+            .background(
+                LinearGradient(
+                    colors: [Color(red: 0.49, green: 0.55, blue: 1.0), Color(red: 0.75, green: 0.52, blue: 0.99)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .opacity(configuration.isPressed ? 0.82 : 1),
+                in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+            )
+            .shadow(color: QuickPanelStyle.purple.opacity(configuration.isPressed ? 0.12 : 0.24), radius: 16, x: 0, y: 8)
+    }
+}
+
+struct QuickSecondaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(QuickPanelStyle.text.opacity(configuration.isPressed ? 0.72 : 0.92))
+            .background(QuickPanelStyle.card.opacity(configuration.isPressed ? 0.65 : 1), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(QuickPanelStyle.stroke, lineWidth: 1)
+            )
     }
 }
 
@@ -2045,6 +2384,7 @@ struct ContentView: View {
     @State private var showingEditor = false
     @State private var editingItem: ReminderItem?
     @State private var showingIconSettings = false
+    @State private var showingThemePanel = false
     @State private var showingHistory = false
     @State private var showingDailyGreeting = false
     @State private var greeting = EmotionalCopy.greetings.randomElement() ?? EmotionalCopy.greetings[0]
@@ -2054,9 +2394,9 @@ struct ContentView: View {
         GeometryReader { proxy in
             let theme = AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista
             let compact = proxy.size.width < 1020
-            let outerPadding: CGFloat = compact ? 10 : 20
-            let innerPadding: CGFloat = compact ? 12 : 18
-            let sidebarWidth: CGFloat = compact ? 286 : 330
+            let outerPadding: CGFloat = compact ? 18 : 30
+            let innerPadding: CGFloat = compact ? 16 : 24
+            let sidebarWidth: CGFloat = compact ? 276 : 300
 
             ZStack {
                 AnimatedGlowBackground(theme: theme)
@@ -2080,7 +2420,7 @@ struct ContentView: View {
                     .frame(minWidth: 0, maxWidth: .infinity)
                 }
                 .padding(innerPadding)
-                .glassPanel(radius: 26)
+                .glassPanel(radius: 30)
                 .padding(outerPadding)
                 .animation(.spring(response: 0.34, dampingFraction: 0.86), value: compact)
                 Button {
@@ -2127,10 +2467,40 @@ struct ContentView: View {
         .sheet(isPresented: $showingIconSettings) {
             IconSettingsSheet()
                 .environmentObject(iconManager)
+                .environmentObject(store)
+                .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
+        }
+        .sheet(isPresented: $showingThemePanel) {
+            ThemePickerSheet(selectedThemeRaw: $selectedThemeRaw)
                 .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
         }
         .onChange(of: showingEditor) { isShowing in
             if !isShowing { editingItem = nil }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .quickPanelRouteRequested)) { notification in
+            guard
+                let rawValue = notification.object as? String,
+                let route = QuickPanelRoute(rawValue: rawValue)
+            else { return }
+            handleQuickPanelRoute(route)
+        }
+    }
+
+    private func handleQuickPanelRoute(_ route: QuickPanelRoute) {
+        selectedDate = Date()
+        switch route {
+        case .today:
+            showingHistory = false
+        case .summary:
+            showingHistory = false
+        case .history:
+            showingHistory = true
+        case .theme:
+            showingHistory = false
+            showingThemePanel = true
+        case .settings:
+            showingHistory = false
+            showingIconSettings = true
         }
     }
 
@@ -2203,24 +2573,7 @@ struct Sidebar: View {
                     action: { showingHistory = true }
                 )
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("快捷概览", systemImage: "sparkles")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(theme.palette.cyan)
-                        .noWrap()
-                    StatRow(title: "今天", value: "\(store.count(on: Date())) 项")
-                    StatRow(title: "选中日期", value: "\(store.count(on: selectedDate)) 项")
-                    StatRow(title: "灵感", value: noteStore.hasNote(on: selectedDate) ? "已记录" : "空")
-                    StatRow(title: "未完成", value: "\(store.items.filter { !$0.isDone }.count) 项")
-                }
-                .padding(16)
-                .glassPanel(radius: 18)
-
-                MoodNote(themeName: AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
-
-                ThemeSwitcher(selectedThemeRaw: $selectedThemeRaw, compact: compact)
-
-                NotificationStatusCard(items: store.items, compact: compact)
+                InspirationSeedCard(noteCount: noteStore.note(for: Date()).count, compact: compact)
             }
             .padding(.horizontal, compact ? 14 : 24)
             .padding(.bottom, 18)
@@ -2329,21 +2682,28 @@ struct CalendarPanel: View {
     @Binding var selectedDate: Date
     @Binding var visibleMonth: Date
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 5), count: 7)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
     private let weekdaySymbols = ["日", "一", "二", "三", "四", "五", "六"]
 
     var body: some View {
-        VStack(spacing: 9) {
+        VStack(spacing: 8) {
             HStack {
                 Button {
                     moveMonth(-1)
                 } label: {
                     Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 30, height: 30)
                 }
-                .buttonStyle(IconButtonStyle())
+                .buttonStyle(.plain)
+                .background(theme.palette.card.opacity(0.72), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(theme.palette.line.opacity(0.75), lineWidth: 1)
+                )
                 Spacer()
                 Text(monthTitle)
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundStyle(theme.palette.text)
                     .noWrap(scale: 0.8)
                 Spacer()
@@ -2351,16 +2711,23 @@ struct CalendarPanel: View {
                     moveMonth(1)
                 } label: {
                     Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 30, height: 30)
                 }
-                .buttonStyle(IconButtonStyle())
+                .buttonStyle(.plain)
+                .background(theme.palette.card.opacity(0.72), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(theme.palette.line.opacity(0.75), lineWidth: 1)
+                )
             }
 
-            LazyVGrid(columns: columns, spacing: 5) {
+            LazyVGrid(columns: columns, spacing: 4) {
                 ForEach(weekdaySymbols, id: \.self) { symbol in
                     Text(symbol)
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(theme.palette.muted)
-                        .frame(height: 18)
+                        .frame(height: 14)
                 }
                 ForEach(days, id: \.self) { day in
                     CalendarDayCell(
@@ -2378,8 +2745,9 @@ struct CalendarPanel: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(12)
-        .glassPanel(radius: 18)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 10)
+        .glassPanel(radius: 22)
         .hoverLift()
     }
 
@@ -2461,6 +2829,52 @@ struct SidebarHistoryButton: View {
         .scaleEffect(isHovering ? 1.012 : 1)
         .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isHovering)
         .onHover { isHovering = $0 }
+    }
+}
+
+struct ThemePickerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
+    @Binding var selectedThemeRaw: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("主题换肤")
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    Text("选择一种更适合此刻状态的视觉氛围。")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                }
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(IconButtonStyle())
+            }
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                ForEach(AppTheme.allCases) { appTheme in
+                    ThemeSwatch(appTheme: appTheme, isSelected: currentTheme == appTheme) {
+                        selectedThemeRaw = appTheme.rawValue
+                    }
+                    .frame(height: 44)
+                }
+            }
+        }
+        .padding(26)
+        .frame(width: 520)
+        .background(
+            LinearGradient(colors: [theme.palette.ink, theme.palette.plum], startPoint: .topLeading, endPoint: .bottomTrailing)
+        )
+    }
+
+    private var currentTheme: AppTheme {
+        AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista
     }
 }
 
@@ -2579,6 +2993,141 @@ struct MoodNote: View {
         .padding(14)
         .glassPanel(radius: 18)
         .hoverLift()
+    }
+}
+
+struct InspirationSeedCard: View {
+    @Environment(\.appTheme) private var theme
+    let noteCount: Int
+    let compact: Bool
+    @State private var animateGlow = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [theme.palette.ink.opacity(0.30), theme.palette.surface.opacity(0.18)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                Circle()
+                    .fill(theme.palette.accent.opacity(0.16))
+                    .frame(width: 132, height: 132)
+                    .blur(radius: animateGlow ? 22 : 32)
+                    .scaleEffect(animateGlow ? 1.10 : 0.94)
+                    .offset(y: 28)
+                if noteCount > 0 {
+                    ForEach(0..<sparkleCount, id: \.self) { index in
+                        Image(systemName: sparkleSymbol(index))
+                            .font(.system(size: CGFloat(8 + index % 3 * 2), weight: .semibold))
+                            .foregroundStyle(index.isMultiple(of: 2) ? theme.palette.warm.opacity(0.82) : theme.palette.accent.opacity(0.78))
+                            .shadow(color: theme.palette.accent.opacity(0.22), radius: 8)
+                            .offset(
+                                x: sparkleOffset(index).x,
+                                y: sparkleOffset(index).y + (animateGlow ? -7 : 6)
+                            )
+                            .opacity(animateGlow ? 0.92 : 0.36)
+                            .animation(.easeInOut(duration: 1.8 + Double(index) * 0.16).repeatForever(autoreverses: true), value: animateGlow)
+                    }
+                }
+                if let image = AppBackgroundLibrary.image(named: "InspirationPlantCapsule", fileExtension: "png") {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: compact ? 126 : 152)
+                        .shadow(color: theme.palette.accent.opacity(animateGlow ? 0.42 : 0.24), radius: animateGlow ? 24 : 16, x: 0, y: 10)
+                        .padding(.vertical, 8)
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: stage.symbol)
+                            .font(.system(size: compact ? 48 : 58, weight: .light))
+                            .foregroundStyle(
+                                LinearGradient(colors: [theme.palette.accent, theme.palette.warm.opacity(0.78)], startPoint: .top, endPoint: .bottom)
+                            )
+                            .shadow(color: theme.palette.accent.opacity(0.26), radius: 18, x: 0, y: 8)
+                        Text(stage.title)
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                    }
+                }
+                if noteCount > 0 {
+                    Text(stage.effect)
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text.opacity(0.90))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(theme.palette.cardStrong.opacity(0.88), in: Capsule())
+                        .overlay(Capsule().stroke(theme.palette.accent.opacity(0.24), lineWidth: 1))
+                        .shadow(color: theme.palette.accent.opacity(0.18), radius: 10, x: 0, y: 4)
+                        .offset(y: compact ? 54 : 64)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+            }
+            .frame(height: compact ? 142 : 166)
+            .overlay(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(theme.palette.line.opacity(0.8), lineWidth: 1)
+            )
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("今日灵感 \(noteCount) 字")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(theme.palette.text)
+                Text(stage.message)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .lineLimit(2)
+            }
+        }
+        .padding(14)
+        .glassPanel(radius: 22, active: noteCount > 0)
+        .onAppear {
+            animateGlow = noteCount > 0
+        }
+        .onChange(of: noteCount) { value in
+            withAnimation(.easeInOut(duration: 0.28)) {
+                animateGlow = value > 0
+            }
+        }
+    }
+
+    private var stage: (title: String, message: String, symbol: String, effect: String) {
+        switch noteCount {
+        case 0:
+            return ("空胶囊", "写下一点灵感，小树苗就会醒来。", "capsule", "等一束光")
+        case 1..<60:
+            return ("种子已落下", "灵感刚刚开始发光。", "circle.dotted", "灵感醒啦")
+        case 60..<160:
+            return ("小芽冒出", "今天的想法正在成形。", "leaf", "慢慢发芽")
+        case 160..<300:
+            return ("树苗生长", "记录已经有了清晰脉络。", "camera.macro", "继续生长")
+        default:
+            return ("灵感成林", "今天的胶囊很饱满。", "tree", "灵感满格")
+        }
+    }
+
+    private var sparkleCount: Int {
+        min(7, max(2, noteCount / 60 + 2))
+    }
+
+    private func sparkleSymbol(_ index: Int) -> String {
+        ["sparkle", "leaf.fill", "circle.fill", "sparkles"][index % 4]
+    }
+
+    private func sparkleOffset(_ index: Int) -> CGPoint {
+        let positions: [CGPoint] = [
+            CGPoint(x: -58, y: -48),
+            CGPoint(x: 52, y: -54),
+            CGPoint(x: -70, y: 2),
+            CGPoint(x: 68, y: 14),
+            CGPoint(x: -38, y: 54),
+            CGPoint(x: 38, y: 48),
+            CGPoint(x: 0, y: -68)
+        ]
+        return positions[index % positions.count]
     }
 }
 
@@ -3069,23 +3618,24 @@ struct CustomIconCard: View {
 struct IconSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
+    @EnvironmentObject private var reminderStore: ReminderStore
     @AppStorage("cardOpacityPercent") private var cardOpacityPercent = 20.0
     @AppStorage("cardBlurPercent") private var cardBlurPercent = 45.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "app.badge")
+                Image(systemName: "gearshape")
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(theme.palette.accent)
                     .frame(width: 44, height: 44)
                     .background(theme.palette.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("启动图标设置")
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                    Text("设置中心")
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.palette.text)
                         .noWrap(scale: 0.72)
-                    Text("可自定义运行时 Dock 图标，建议使用高清透明 PNG。")
+                    Text("把外观、记录、提醒和隐私放在更清晰的位置。")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(theme.palette.muted)
                         .noWrap(scale: 0.7)
@@ -3099,12 +3649,30 @@ struct IconSettingsSheet: View {
                 .buttonStyle(IconButtonStyle())
             }
 
-            CustomIconCard(compact: false)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 16) {
+                    PreferenceSection(title: "外观", symbol: "paintpalette") {
+                        CustomIconCard(compact: false)
+                        VisualTuningCard(opacityPercent: $cardOpacityPercent, blurPercent: $cardBlurPercent)
+                    }
 
-            VisualTuningCard(
-                opacityPercent: $cardOpacityPercent,
-                blurPercent: $cardBlurPercent
-            )
+                    PreferenceSection(title: "记录", symbol: "square.and.pencil") {
+                        PreferenceInfoRow(title: "今日胶囊自动保存", detail: "输入灵感时会写入本机，每日胶囊不会上传。", symbol: "checkmark.seal")
+                        PreferenceInfoRow(title: "灵感字数", detail: "300 字为蓄力目标，单日文本上限为 2000 字。", symbol: "textformat.size")
+                    }
+
+                    PreferenceSection(title: "提醒", symbol: "bell") {
+                        NotificationStatusCard(items: reminderStore.items, compact: false)
+                    }
+
+                    PreferenceSection(title: "隐私", symbol: "hand.raised") {
+                        PreferenceInfoRow(title: "本地数据", detail: "事项、灵感、主题偏好和自定义图标都保存在本机 Application Support。", symbol: "internaldrive")
+                        PreferenceInfoRow(title: "天气服务", detail: "天气卡片会访问 ipapi.co 与 open-meteo.com，用于当前城市天气展示。", symbol: "cloud.sun")
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(maxHeight: 620)
 
             HStack {
                 Spacer()
@@ -3115,8 +3683,8 @@ struct IconSettingsSheet: View {
                 .frame(width: 120)
             }
         }
-        .padding(28)
-        .frame(width: 560)
+        .padding(30)
+        .frame(width: 640, height: 760)
         .background(
             ZStack {
                 LinearGradient(colors: [theme.palette.ink, theme.palette.plum], startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -3126,6 +3694,63 @@ struct IconSettingsSheet: View {
                     .blur(radius: 58)
                     .offset(x: 210, y: -170)
             }
+        )
+    }
+}
+
+struct PreferenceSection<Content: View>: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let symbol: String
+    let content: Content
+
+    init(title: String, symbol: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.symbol = symbol
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.palette.text)
+            content
+        }
+        .padding(18)
+        .glassPanel(radius: 24)
+    }
+}
+
+struct PreferenceInfoRow: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let detail: String
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(theme.palette.accent)
+                .frame(width: 34, height: 34)
+                .background(theme.palette.accent.opacity(0.13), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(theme.palette.text)
+                Text(detail)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(theme.palette.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(theme.palette.line, lineWidth: 1)
         )
     }
 }
@@ -3318,39 +3943,39 @@ struct CalendarDayCell: View {
                 Button {
                     selectedDate = day
                 } label: {
-                    VStack(spacing: 4) {
+                    VStack(spacing: 3) {
                         Text("\(Calendar.current.component(.day, from: day))")
-                            .font(.system(size: 13, weight: isSelected ? .bold : .medium))
+                            .font(.system(size: 12, weight: isSelected ? .bold : .medium))
                             .noWrap(scale: 0.8)
                         HStack(spacing: 3) {
                             Circle()
                                 .fill(count > 0 ? theme.palette.cyan : .clear)
-                                .frame(width: 5, height: 5)
+                                .frame(width: 4, height: 4)
                             Circle()
                                 .fill(hasNote ? theme.palette.warm : .clear)
-                                .frame(width: 5, height: 5)
+                                .frame(width: 4, height: 4)
                         }
-                        .frame(height: 5)
+                        .frame(height: 4)
                     }
                     .foregroundStyle(theme.palette.text)
-                    .frame(height: 32)
+                    .frame(height: 28)
                     .frame(maxWidth: .infinity)
                     .background(
                         isSelected ?
-                        LinearGradient(colors: [theme.palette.blue.opacity(0.44), theme.palette.lavender.opacity(0.26)], startPoint: .topLeading, endPoint: .bottomTrailing) :
+                        LinearGradient(colors: [theme.palette.blue.opacity(0.36), theme.palette.lavender.opacity(0.18)], startPoint: .topLeading, endPoint: .bottomTrailing) :
                             LinearGradient(colors: [.clear], startPoint: .topLeading, endPoint: .bottomTrailing),
-                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(isSelected ? theme.palette.cyan.opacity(0.9) : (isToday ? theme.palette.cyan.opacity(0.55) : .clear), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(isSelected ? theme.palette.cyan.opacity(0.78) : (isToday ? theme.palette.cyan.opacity(0.45) : .clear), lineWidth: 1)
                     )
                 }
                 .buttonStyle(.plain)
                 .hoverLift()
             } else {
                 Color.clear
-                    .frame(height: 32)
+                    .frame(height: 28)
                     .frame(maxWidth: .infinity)
             }
         }
@@ -3781,67 +4406,34 @@ struct DayDetail: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: compact ? 14 : 18) {
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(dayTitle)
-                            .font(.system(size: compact ? 28 : 34, weight: .bold, design: .rounded))
-                            .foregroundStyle(theme.palette.text)
-                            .noWrap(scale: 0.72)
-                        Text("事项提醒与今日灵感胶囊都会保存在本机。")
-                            .font(.system(size: 13))
-                            .foregroundStyle(theme.palette.muted)
-                            .noWrap(scale: 0.7)
-                    }
-                    .layoutPriority(1)
-                    Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: compact ? 18 : 24) {
+                HomeEnvironmentHeader(selectedDate: selectedDate, compact: compact) {
+                    weatherStore.refresh()
                 }
-                .padding(.top, compact ? 16 : 24)
+                .padding(.top, compact ? 16 : 28)
 
-                WeatherCard(compact: compact)
-
-                StatusGrid(items: store.items(on: selectedDate), compact: compact)
-
-                SummaryCard(capsule: capsule, compact: compact) {
-                    copySummary()
+                TodayCapsuleHeroCard(selectedDate: selectedDate, capsule: capsule, compact: compact, onCopy: copySummary) {
+                    showToast("今日总结已刷新。")
                 }
 
-                NotebookPanel(selectedDate: selectedDate, compact: compact)
-
-                let items = store.items(on: selectedDate)
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Label("提醒事项", systemImage: theme.symbol(.task))
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
-                            .foregroundStyle(theme.palette.text)
-                            .noWrap()
-                        Spacer()
-                        Text("\(items.count) 项")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(theme.palette.muted)
-                    }
-                    if items.isEmpty {
-                        EmptyState(showingEditor: $showingEditor)
-                            .frame(maxWidth: .infinity, minHeight: compact ? 180 : 220)
-                    } else {
-                        ForEach(items) { item in
-                            ReminderCard(item: item, onToggle: {
-                                if !item.isDone {
-                                    showToast(for: item)
-                                }
-                                store.toggleDone(item)
-                            }, onEdit: {
-                                editingItem = item
-                                showingEditor = true
-                            }, onDelete: {
-                                store.delete(item)
-                            })
+                TodayActionPanel(
+                    items: store.items(on: selectedDate),
+                    compact: compact,
+                    onAdd: { showingEditor = true },
+                    onToggle: { item in
+                        if !item.isDone {
+                            showToast("完成了「\(item.title)」，今天又多了一点确定感。")
                         }
+                        store.toggleDone(item)
+                    },
+                    onEdit: { item in
+                        editingItem = item
+                        showingEditor = true
                     }
-                }
-                .padding(.bottom, 24)
+                )
+                .padding(.bottom, 28)
             }
-            .padding(.horizontal, compact ? 20 : 32)
+            .padding(.horizontal, compact ? 22 : 36)
         }
         .overlay(alignment: .bottom) {
             if let toastMessage {
@@ -3866,31 +4458,482 @@ struct DayDetail: View {
     private func copySummary() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(capsule.summary, forType: .string)
+        showToast("今日总结已复制，可以直接贴到复盘或周报里。")
+    }
+
+    private func showToast(_ message: String) {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-            toastMessage = "今日总结已复制，可以直接贴到复盘或周报里。"
+            toastMessage = message
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
             withAnimation(.easeOut(duration: 0.22)) {
                 toastMessage = nil
             }
         }
     }
+}
 
-    private func showToast(for item: ReminderItem) {
-        let messages = [
-            "完成了「\(item.title)」，今天又多了一点确定感。",
-            "漂亮，刚刚那一下很关键。",
-            "你已经把一件事从脑子里放下了。",
-            "小小推进，也算数。"
-        ]
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-            toastMessage = messages.randomElement()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
-            withAnimation(.easeOut(duration: 0.22)) {
-                toastMessage = nil
+struct HomeEnvironmentHeader: View {
+    @EnvironmentObject private var weatherStore: WeatherStore
+    @Environment(\.appTheme) private var theme
+    let selectedDate: Date
+    let compact: Bool
+    let onRefreshWeather: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(dayTitle)
+                    .font(.system(size: compact ? 27 : 32, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                    .noWrap(scale: 0.72)
+                Text(greetingText)
+                    .font(.system(size: compact ? 15 : 17, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .noWrap(scale: 0.72)
+                Capsule()
+                    .fill(LinearGradient(colors: [theme.palette.accent, theme.palette.warm.opacity(0.76)], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: 42, height: 4)
+                    .padding(.top, 6)
+            }
+            .layoutPriority(1)
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 12) {
+                WeatherMiniPill(compact: compact, onRefresh: onRefreshWeather)
+                Button(action: onRefreshWeather) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 42, height: 42)
+                }
+                .buttonStyle(IconButtonStyle(tint: theme.palette.accent))
+                .help("刷新天气")
             }
         }
+        .onAppear {
+            if weatherStore.info == nil {
+                weatherStore.refresh()
+            }
+        }
+    }
+
+    private var dayTitle: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = Calendar.current.isDateInToday(selectedDate) ? "M月d日 EEEE" : "M月d日 EEEE"
+        return formatter.string(from: selectedDate)
+    }
+
+    private var greetingText: String {
+        Calendar.current.isDateInToday(selectedDate) ? "今天适合慢慢整理想法" : "回看这一天留下的胶囊"
+    }
+}
+
+struct WeatherMiniPill: View {
+    @EnvironmentObject private var weatherStore: WeatherStore
+    @Environment(\.appTheme) private var theme
+    let compact: Bool
+    let onRefresh: () -> Void
+
+    var body: some View {
+        Button(action: onRefresh) {
+            HStack(spacing: 10) {
+                Image(systemName: weatherStore.info?.icon ?? "cloud.sun.fill")
+                    .font(.system(size: compact ? 18 : 22, weight: .semibold))
+                    .foregroundStyle(theme.palette.warm)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(primary)
+                        .font(.system(size: compact ? 13 : 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                        .noWrap(scale: 0.68)
+                    Text(secondary)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                        .noWrap(scale: 0.7)
+                }
+            }
+            .padding(.horizontal, compact ? 12 : 16)
+            .frame(height: compact ? 50 : 58)
+            .glassPanel(radius: 18)
+        }
+        .buttonStyle(.plain)
+        .hoverLift()
+    }
+
+    private var primary: String {
+        guard let info = weatherStore.info else { return "今日天气" }
+        return "\(info.city) \(Int(info.temperature.rounded()))°C"
+    }
+
+    private var secondary: String {
+        guard let info = weatherStore.info else { return weatherStore.message }
+        return "\(info.summary) · 风速 \(Int(info.windSpeed.rounded()))"
+    }
+}
+
+struct TodayCapsuleHeroCard: View {
+    @EnvironmentObject private var noteStore: NoteStore
+    @EnvironmentObject private var reminderStore: ReminderStore
+    @EnvironmentObject private var weatherStore: WeatherStore
+    @Environment(\.appTheme) private var theme
+    let selectedDate: Date
+    let capsule: DailyCapsule
+    let compact: Bool
+    let onCopy: () -> Void
+    let onRefreshSummary: () -> Void
+    @State private var draft = ""
+    @State private var analysis = InspirationAnalyzer.analyze("")
+    @State private var analysisWorkItem: DispatchWorkItem?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 16 : 20) {
+            HStack(alignment: .top, spacing: 16) {
+                CapsuleOrb(status: capsule.status, progress: inspirationProgress, size: compact ? 46 : 56)
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("今日胶囊")
+                        .font(.system(size: compact ? 22 : 26, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                        .noWrap()
+                    Text(capsule.summary)
+                        .font(.system(size: compact ? 11 : 13, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .layoutPriority(1)
+                Spacer()
+                HStack(spacing: 10) {
+                    CapsuleHeroActionButton(
+                        title: compact ? "复制" : "复制总结",
+                        symbol: "doc.on.doc",
+                        compact: compact,
+                        action: onCopy
+                    )
+                    .help("复制今日总结")
+                    CapsuleHeroActionButton(
+                        title: "刷新",
+                        symbol: "arrow.clockwise",
+                        compact: compact,
+                        action: onRefreshSummary
+                    )
+                    .help("刷新今日总结")
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(2)
+            }
+
+            ZStack(alignment: .topLeading) {
+                if draft.isEmpty {
+                    Text("写下今天闪过的一个想法……")
+                        .font(.system(size: compact ? 12 : 13, weight: .medium))
+                        .foregroundStyle(theme.palette.muted.opacity(0.62))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 15)
+                }
+                TextEditor(text: $draft)
+                    .font(.system(size: compact ? 12 : 13))
+                    .foregroundStyle(theme.palette.text)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.clear)
+                    .frame(minHeight: compact ? 104 : 122)
+                    .onChange(of: draft) { updateDraft($0) }
+            }
+            .padding(6)
+            .background(theme.palette.ink.opacity(0.20), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(alignment: .bottomTrailing) {
+                HStack(spacing: 8) {
+                    Image(systemName: "leaf")
+                    Text("\(draft.count) / \(inspirationCharacterLimit)")
+                }
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.palette.muted)
+                .padding(.trailing, 18)
+                .padding(.bottom, 14)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(draft.isEmpty ? theme.palette.line : theme.palette.accent.opacity(0.42), lineWidth: 1)
+            )
+
+            HStack(alignment: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("关键词")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(theme.palette.muted)
+                    FlowPillRow(items: analysis.keywords.isEmpty ? capsule.keywords : analysis.keywords, fallback: ["慢慢记录"])
+                }
+                .layoutPriority(1)
+                Spacer()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("心情状态")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(theme.palette.muted)
+                    HStack(spacing: 9) {
+                        Image(systemName: analysis.moodSymbol)
+                            .foregroundStyle(theme.palette.accent)
+                        Text("状态：\(analysis.mood)")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(theme.palette.text)
+                        Circle()
+                            .fill(theme.palette.accent)
+                            .frame(width: 5, height: 5)
+                    }
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .background(theme.palette.card, in: Capsule())
+                    .overlay(Capsule().stroke(theme.palette.line, lineWidth: 1))
+                }
+            }
+        }
+        .padding(compact ? 20 : 24)
+        .glassPanel(radius: 28, active: capsule.hasContent || !draft.isEmpty)
+        .hoverLift()
+        .onAppear {
+            draft = noteStore.note(for: selectedDate)
+            analysis = InspirationAnalyzer.analyze(draft)
+        }
+        .onChange(of: selectedDate) { newDate in
+            noteStore.flushSave()
+            draft = noteStore.note(for: newDate)
+            analysis = InspirationAnalyzer.analyze(draft)
+        }
+        .onDisappear {
+            noteStore.flushSave()
+        }
+    }
+
+    private var inspirationProgress: Double {
+        min(Double(draft.count) / Double(inspirationProgressTarget), 1.0)
+    }
+
+    private func updateDraft(_ value: String) {
+        let limited = String(value.prefix(inspirationCharacterLimit))
+        if limited != value {
+            draft = limited
+            return
+        }
+        noteStore.setNote(limited, for: selectedDate)
+        analysisWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            analysis = InspirationAnalyzer.analyze(limited)
+        }
+        analysisWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+}
+
+struct CapsuleHeroActionButton: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let symbol: String
+    let compact: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: compact ? 6 : 8) {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            .foregroundStyle(theme.palette.text)
+            .frame(width: compact ? 74 : 104, height: 38)
+            .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .background(theme.palette.cardStrong, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(theme.palette.line, lineWidth: 1)
+        )
+        .hoverLift()
+    }
+}
+
+struct CapsuleOrb: View {
+    @Environment(\.appTheme) private var theme
+    let status: CapsuleStatus
+    let progress: Double
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [theme.palette.accent.opacity(0.82), theme.palette.surface.opacity(0.45), theme.palette.ink.opacity(0.15)],
+                        center: .topLeading,
+                        startRadius: 2,
+                        endRadius: size
+                    )
+                )
+            Circle()
+                .stroke(Color.white.opacity(0.30), lineWidth: 1)
+            Circle()
+                .trim(from: 0, to: max(0.08, progress))
+                .stroke(theme.palette.warm.opacity(0.85), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .padding(3)
+            Image(systemName: status.symbol)
+                .font(.system(size: size * 0.34, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.92))
+        }
+        .frame(width: size, height: size)
+        .shadow(color: theme.palette.accent.opacity(0.24), radius: 18, x: 0, y: 8)
+    }
+}
+
+struct FlowPillRow: View {
+    @Environment(\.appTheme) private var theme
+    let items: [String]
+    let fallback: [String]
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(Array((items.isEmpty ? fallback : items).prefix(4)), id: \.self) { item in
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(theme.palette.accent.opacity(0.85))
+                        .frame(width: 5, height: 5)
+                    Text(item)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.palette.text.opacity(0.86))
+                        .noWrap(scale: 0.72)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(theme.palette.card, in: Capsule())
+                .overlay(Capsule().stroke(theme.palette.line, lineWidth: 1))
+            }
+        }
+    }
+}
+
+struct TodayActionPanel: View {
+    @Environment(\.appTheme) private var theme
+    let items: [ReminderItem]
+    let compact: Bool
+    let onAdd: () -> Void
+    let onToggle: (ReminderItem) -> Void
+    let onEdit: (ReminderItem) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 14) {
+                Label("今日行动", systemImage: "checklist.checked")
+                    .font(.system(size: compact ? 18 : 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                    .noWrap()
+                Spacer()
+                Text("已完成 \(doneCount)/\(max(items.count, 1))")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(theme.palette.muted)
+                ProgressView(value: items.isEmpty ? 0 : Double(doneCount), total: Double(max(items.count, 1)))
+                    .progressViewStyle(.linear)
+                    .tint(theme.palette.accent)
+                    .frame(width: compact ? 110 : 160)
+                Button(action: onAdd) {
+                    Label("添加提醒", systemImage: "bell")
+                        .font(.system(size: 12, weight: .bold))
+                        .noWrap()
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+
+            if items.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 32, weight: .light))
+                        .foregroundStyle(theme.palette.accent)
+                    Text("今天还没有行动事项")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    Text("添加一个提醒，让今天有一个温柔的落点。")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                    Button(action: onAdd) {
+                        Label("添加提醒事项", systemImage: "plus.circle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .frame(width: 160)
+                }
+                .frame(maxWidth: .infinity, minHeight: 170)
+            } else {
+                LazyVGrid(columns: gridColumns, spacing: 10) {
+                    ForEach(items.prefix(5)) { item in
+                        CompactReminderRow(item: item, onToggle: { onToggle(item) }, onEdit: { onEdit(item) })
+                    }
+                }
+                if items.count > 5 {
+                    Text("其余 \(items.count - 5) 项已收起，保持首页轻盈。")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                }
+            }
+        }
+        .padding(compact ? 18 : 22)
+        .glassPanel(radius: 26)
+    }
+
+    private var gridColumns: [GridItem] {
+        let count = compact ? 1 : 2
+        return Array(repeating: GridItem(.flexible(), spacing: 12), count: count)
+    }
+
+    private var doneCount: Int {
+        items.filter(\.isDone).count
+    }
+}
+
+struct CompactReminderRow: View {
+    @Environment(\.appTheme) private var theme
+    let item: ReminderItem
+    let onToggle: () -> Void
+    let onEdit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Button(action: onToggle) {
+                Image(systemName: item.isDone ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(item.isDone ? theme.palette.accent : theme.palette.muted)
+            }
+            .buttonStyle(.plain)
+            Button(action: onEdit) {
+                HStack {
+                    Text(item.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(item.isDone ? theme.palette.muted : theme.palette.text)
+                        .strikethrough(item.isDone, color: theme.palette.muted)
+                        .noWrap(scale: 0.72)
+                    Spacer()
+                    Text(timeText)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(theme.palette.muted)
+                        .noWrap(scale: 0.8)
+                }
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+        .background(theme.palette.card.opacity(item.isDone ? 0.62 : 1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(theme.palette.line, lineWidth: 1)
+        )
+        .hoverLift()
+    }
+
+    private var timeText: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: item.remindAt)
     }
 }
 
@@ -3964,6 +5007,18 @@ struct HistoryCapsulesView: View {
         DailyCapsuleService.historyCapsules(noteStore: noteStore, reminderStore: reminderStore, weatherInfo: weatherStore.info)
     }
 
+    private var groupedCapsules: [(String, [DailyCapsule])] {
+        let groups = Dictionary(grouping: capsules) { capsule in
+            monthTitle(for: capsule.date)
+        }
+        return groups
+            .map { ($0.key, $0.value.sorted { $0.date > $1.date }) }
+            .sorted { lhs, rhs in
+                guard let left = lhs.1.first?.date, let right = rhs.1.first?.date else { return lhs.0 > rhs.0 }
+                return left > right
+            }
+    }
+
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: compact ? 14 : 18) {
@@ -3977,12 +5032,34 @@ struct HistoryCapsulesView: View {
                 } else if capsules.isEmpty {
                     historyEmpty
                 } else {
-                    LazyVStack(spacing: 12) {
-                        ForEach(capsules) { capsule in
-                            CapsuleHistoryCard(capsule: capsule, compact: compact) {
-                                withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
-                                    detailCapsule = capsule
-                                    selectedDate = capsule.date
+                    LazyVStack(alignment: .leading, spacing: compact ? 18 : 22) {
+                        ForEach(groupedCapsules, id: \.0) { group in
+                            VStack(alignment: .leading, spacing: 14) {
+                                Text(group.0)
+                                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    .foregroundStyle(theme.palette.muted)
+                                    .padding(.leading, 4)
+                                VStack(spacing: 0) {
+                                    ForEach(group.1) { capsule in
+                                        HStack(alignment: .top, spacing: 14) {
+                                            VStack(spacing: 6) {
+                                                Circle()
+                                                    .fill(theme.palette.accent.opacity(0.82))
+                                                    .frame(width: 9, height: 9)
+                                                Rectangle()
+                                                    .fill(theme.palette.line)
+                                                    .frame(width: 1)
+                                            }
+                                            .frame(width: 18)
+                                            CapsuleHistoryCard(capsule: capsule, compact: compact) {
+                                                withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                                    detailCapsule = capsule
+                                                    selectedDate = capsule.date
+                                                }
+                                            }
+                                        }
+                                        .padding(.bottom, 16)
+                                    }
                                 }
                             }
                         }
@@ -4047,6 +5124,13 @@ struct HistoryCapsulesView: View {
         .frame(maxWidth: .infinity, minHeight: compact ? 320 : 420)
         .glassPanel(radius: 24)
     }
+
+    private func monthTitle(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "yyyy年 M月"
+        return formatter.string(from: date)
+    }
 }
 
 struct CapsuleHistoryCard: View {
@@ -4058,12 +5142,8 @@ struct CapsuleHistoryCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .top, spacing: compact ? 10 : 14) {
-                Image(systemName: capsule.status.symbol)
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(theme.palette.cyan)
-                    .frame(width: 42, height: 42)
-                    .background(theme.palette.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            HStack(alignment: .top, spacing: compact ? 12 : 16) {
+                CapsuleOrb(status: capsule.status, progress: capsule.reminders.isEmpty ? 0.35 : Double(capsule.completedCount) / Double(max(capsule.reminders.count, 1)), size: compact ? 42 : 48)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text(capsule.displayDate)
@@ -4072,10 +5152,16 @@ struct CapsuleHistoryCard: View {
                             .noWrap()
                         Text(capsule.status.title)
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(theme.palette.warm)
+                            .foregroundStyle(theme.palette.accent)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(theme.palette.warm.opacity(0.12), in: Capsule())
+                            .background(theme.palette.accent.opacity(0.12), in: Capsule())
+                        Text(capsule.completionText)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(theme.palette.card, in: Capsule())
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .bold))
@@ -4085,16 +5171,14 @@ struct CapsuleHistoryCard: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(theme.palette.text)
                         .lineLimit(2)
-                    Text(capsule.excerpt)
-                        .font(.system(size: 12))
-                        .foregroundStyle(theme.palette.muted)
-                        .lineLimit(2)
+                    FlowPillRow(items: capsule.keywords, fallback: [capsule.mood])
                 }
                 .layoutPriority(1)
             }
-            .padding(15)
-            .glassPanel(radius: 18, active: isHovering)
-            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .padding(compact ? 15 : 18)
+            .frame(maxWidth: .infinity, minHeight: compact ? 120 : 132, maxHeight: 150)
+            .glassPanel(radius: 22, active: isHovering)
+            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovering ? 1.008 : 1)
