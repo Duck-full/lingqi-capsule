@@ -2,11 +2,74 @@ import SwiftUI
 import AppKit
 import UserNotifications
 import UniformTypeIdentifiers
+import OSLog
 
 private let inspirationProgressTarget = 300
 private let inspirationCharacterLimit = 2000
 private let quickInspirationCharacterLimit = 200
 private let defaultWindowSize = NSSize(width: 1291, height: 893)
+
+enum PerformanceDiagnostics {
+    private static let logger = Logger(subsystem: "local.codex.lingqi-capsule", category: "performance")
+    private static let writeQueue = DispatchQueue(label: "local.codex.lingqi.performance-log", qos: .utility)
+    private static let logURL: URL = {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let folder = support.appendingPathComponent("DailyReminderWidget", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder.appendingPathComponent("performance.log")
+    }()
+    private static var launchStartTime: CFAbsoluteTime?
+    private static var didRecordFirstContent = false
+
+    static var isEnabled: Bool {
+        if UserDefaults.standard.object(forKey: "performanceDiagnosticsEnabled") == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: "performanceDiagnosticsEnabled")
+    }
+
+    @discardableResult
+    static func measure<T>(_ name: String, operation: () throws -> T) rethrows -> T {
+        let start = CFAbsoluteTimeGetCurrent()
+        let result = try operation()
+        record(name, milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000)
+        return result
+    }
+
+    static func record(_ name: String, milliseconds: Double, details: String = "") {
+        guard isEnabled else { return }
+        let rounded = String(format: "%.2f", milliseconds)
+        logger.debug("\(name, privacy: .public) \(rounded, privacy: .public)ms \(details, privacy: .public)")
+        let line = "\(ISO8601DateFormatter().string(from: Date()))\t\(name)\t\(rounded)ms\t\(details)\n"
+        writeQueue.async {
+            guard let data = line.data(using: .utf8) else { return }
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: logURL, options: [.atomic])
+            }
+        }
+    }
+
+    static func recordFirstContentIfNeeded() {
+        guard !didRecordFirstContent else { return }
+        didRecordFirstContent = true
+        guard let launchStartTime else { return }
+        record(
+            "app.first-content",
+            milliseconds: (CFAbsoluteTimeGetCurrent() - launchStartTime) * 1000
+        )
+    }
+
+    static func markLaunchStart() {
+        if launchStartTime == nil {
+            launchStartTime = CFAbsoluteTimeGetCurrent()
+        }
+    }
+}
 
 enum QuickPanelRoute: String {
     case today
@@ -61,14 +124,19 @@ final class ReminderStore: ObservableObject {
     @Published private(set) var items: [ReminderItem] = []
 
     private let fileURL: URL
+    private let schedulesNotifications: Bool
     private let saveQueue = DispatchQueue(label: "local.codex.lingqi.reminders.save", qos: .utility)
+    private var itemsByDay: [String: [ReminderItem]] = [:]
+    private var pendingSave: DispatchWorkItem?
     private var terminationObserver: NSObjectProtocol?
 
-    init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let folder = support.appendingPathComponent("DailyReminderWidget", isDirectory: true)
+    init(storageDirectory: URL? = nil, schedulesNotifications: Bool = true) {
+        PerformanceDiagnostics.markLaunchStart()
+        let support = storageDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let folder = storageDirectory ?? support.appendingPathComponent("DailyReminderWidget", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         fileURL = folder.appendingPathComponent("reminders.json")
+        self.schedulesNotifications = schedulesNotifications
         load()
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             self?.flushSave()
@@ -85,35 +153,42 @@ final class ReminderStore: ObservableObject {
     func add(_ item: ReminderItem) {
         items.append(item)
         sort()
+        addToDayIndex(item)
         persistAndSchedule(item)
     }
 
     func update(_ item: ReminderItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
+        let previousItem = items[index]
         items[index] = item
         sort()
+        removeFromDayIndex(previousItem)
+        addToDayIndex(item)
         persistAndSchedule(item)
     }
 
     func delete(_ item: ReminderItem) {
         items.removeAll { $0.id == item.id }
+        removeFromDayIndex(item)
         persist()
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: NotificationScheduler.identifiers(for: item))
+        if schedulesNotifications {
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: NotificationScheduler.identifiers(for: item))
+        }
     }
 
     func toggleDone(_ item: ReminderItem) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[index].isDone.toggle()
+        updateDayIndex(items[index])
         persistAndSchedule(items[index])
     }
 
     func items(on day: Date) -> [ReminderItem] {
-        items.filter { Calendar.current.isDate($0.date, inSameDayAs: day) }
-            .sorted { $0.remindAt < $1.remindAt }
+        itemsByDay[DateKey.string(from: day)] ?? []
     }
 
     func count(on day: Date) -> Int {
-        items(on: day).count
+        itemsByDay[DateKey.string(from: day)]?.count ?? 0
     }
 
     private func sort() {
@@ -130,27 +205,42 @@ final class ReminderStore: ObservableObject {
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            items = try decoder.decode([ReminderItem].self, from: data)
+            items = try PerformanceDiagnostics.measure("reminders.decode") {
+                try decoder.decode([ReminderItem].self, from: data)
+            }
             sort()
+            rebuildDayIndex()
+            PerformanceDiagnostics.record("reminders.load", milliseconds: 0, details: "count=\(items.count) bytes=\(data.count)")
         } catch {
             items = []
+            itemsByDay = [:]
         }
     }
 
     private func persistAndSchedule(_ item: ReminderItem) {
         persist()
-        NotificationScheduler.shared.reschedule(item: item)
-    }
-
-    private func persist() {
-        let snapshot = items
-        let fileURL = fileURL
-        saveQueue.async {
-            Self.write(snapshot, to: fileURL)
+        if schedulesNotifications {
+            NotificationScheduler.shared.reschedule(item: item)
         }
     }
 
-    private func flushSave() {
+    private func persist() {
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let snapshot = self.items
+            let fileURL = self.fileURL
+            self.saveQueue.async {
+                Self.write(snapshot, to: fileURL)
+            }
+        }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    func flushSave() {
+        pendingSave?.cancel()
+        pendingSave = nil
         let snapshot = items
         let fileURL = fileURL
         saveQueue.sync {
@@ -163,12 +253,61 @@ final class ReminderStore: ObservableObject {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.sortedKeys]
+            let start = CFAbsoluteTimeGetCurrent()
             let data = try encoder.encode(items)
             try data.write(to: fileURL, options: [.atomic])
+            PerformanceDiagnostics.record(
+                "reminders.write",
+                milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000,
+                details: "count=\(items.count) bytes=\(data.count)"
+            )
         } catch {
             NSLog("Failed to save reminders: \(error.localizedDescription)")
         }
     }
+
+    private func rebuildDayIndex() {
+        itemsByDay = Dictionary(grouping: items, by: { DateKey.string(from: $0.date) })
+            .mapValues { $0.sorted { $0.remindAt < $1.remindAt } }
+    }
+
+    private func addToDayIndex(_ item: ReminderItem) {
+        let key = DateKey.string(from: item.date)
+        var dayItems = itemsByDay[key] ?? []
+        dayItems.append(item)
+        dayItems.sort { $0.remindAt < $1.remindAt }
+        itemsByDay[key] = dayItems
+    }
+
+    private func removeFromDayIndex(_ item: ReminderItem) {
+        let key = DateKey.string(from: item.date)
+        guard var dayItems = itemsByDay[key] else { return }
+        dayItems.removeAll { $0.id == item.id }
+        if dayItems.isEmpty {
+            itemsByDay.removeValue(forKey: key)
+        } else {
+            itemsByDay[key] = dayItems
+        }
+    }
+
+    private func updateDayIndex(_ item: ReminderItem) {
+        let key = DateKey.string(from: item.date)
+        guard var dayItems = itemsByDay[key],
+              let index = dayItems.firstIndex(where: { $0.id == item.id }) else {
+            addToDayIndex(item)
+            return
+        }
+        dayItems[index] = item
+        itemsByDay[key] = dayItems
+    }
+
+    #if PERFORMANCE_BENCHMARK
+    func replaceAllForBenchmark(_ newItems: [ReminderItem]) {
+        items = newItems
+        sort()
+        rebuildDayIndex()
+    }
+    #endif
 }
 
 enum DateKey {
@@ -203,16 +342,23 @@ enum DateKey {
 final class NoteStore: ObservableObject {
     @Published private var notesByDate: [String: String] = [:]
 
-    private let fileURL: URL
+    private let legacyFileURL: URL
+    private let notesFolderURL: URL
+    private let migrationMarkerURL: URL
     private let saveQueue = DispatchQueue(label: "local.codex.lingqi.notes.save", qos: .utility)
     private var pendingSave: DispatchWorkItem?
+    private var pendingKey: String?
+    private var pendingNote: String?
     private var terminationObserver: NSObjectProtocol?
 
-    init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let folder = support.appendingPathComponent("DailyReminderWidget", isDirectory: true)
+    init(storageDirectory: URL? = nil) {
+        let support = storageDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let folder = storageDirectory ?? support.appendingPathComponent("DailyReminderWidget", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        fileURL = folder.appendingPathComponent("daily-notes.json")
+        legacyFileURL = folder.appendingPathComponent("daily-notes.json")
+        notesFolderURL = folder.appendingPathComponent("daily-notes", isDirectory: true)
+        migrationMarkerURL = notesFolderURL.appendingPathComponent(".migration-complete")
+        try? FileManager.default.createDirectory(at: notesFolderURL, withIntermediateDirectories: true)
         load()
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             self?.flushSave()
@@ -243,7 +389,7 @@ final class NoteStore: ObservableObject {
             notesByDate[key] = note
         }
         guard oldValue != note else { return }
-        scheduleSave()
+        scheduleSave(key: key, note: notesByDate[key])
     }
 
     func appendNote(_ note: String, for date: Date) {
@@ -255,22 +401,20 @@ final class NoteStore: ObservableObject {
     }
 
     func recentInspirations(limit: Int = 3) -> [RecentInspiration] {
-        notesByDate
-            .compactMap { key, note -> (Date, String)? in
-                guard let date = DateKey.date(from: key) else { return nil }
-                return (date, note)
+        var result: [RecentInspiration] = []
+        let sortedKeys = notesByDate.keys.sorted(by: >)
+        for key in sortedKeys {
+            guard let date = DateKey.date(from: key), let note = notesByDate[key] else { continue }
+            for line in note.components(separatedBy: .newlines).reversed() {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                result.append(RecentInspiration(text: trimmed, date: Calendar.current.isDateInToday(date) ? Date() : date))
+                if result.count == limit {
+                    return result
+                }
             }
-            .sorted { $0.0 > $1.0 }
-            .flatMap { date, note in
-                note
-                    .components(separatedBy: .newlines)
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                    .reversed()
-                    .map { RecentInspiration(text: $0, date: Calendar.current.isDateInToday(date) ? Date() : date) }
-            }
-            .prefix(limit)
-            .map { $0 }
+        }
+        return result
     }
 
     func hasNote(on date: Date) -> Bool {
@@ -278,35 +422,102 @@ final class NoteStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
-        notesByDate = (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+        let start = CFAbsoluteTimeGetCurrent()
+        let fileManager = FileManager.default
+        let noteFiles = (try? fileManager.contentsOfDirectory(
+            at: notesFolderURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        let legacyExists = fileManager.fileExists(atPath: legacyFileURL.path)
+        let migrationCompleted = fileManager.fileExists(atPath: migrationMarkerURL.path)
+
+        if !legacyExists || migrationCompleted {
+            notesByDate = Dictionary(uniqueKeysWithValues: noteFiles.compactMap { url in
+                guard url.pathExtension == "txt",
+                      let note = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+                return (url.deletingPathExtension().lastPathComponent, note)
+            })
+        } else if let data = try? Data(contentsOf: legacyFileURL),
+                  let legacyNotes = try? JSONDecoder().decode([String: String].self, from: data) {
+            notesByDate = legacyNotes
+            migrateLegacyNotes(legacyNotes)
+        }
+        PerformanceDiagnostics.record(
+            "notes.load",
+            milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000,
+            details: "days=\(notesByDate.count)"
+        )
     }
 
     func flushSave() {
         pendingSave?.cancel()
         pendingSave = nil
-        let snapshot = notesByDate
-        let fileURL = fileURL
+        let key = pendingKey
+        let note = pendingNote
+        pendingKey = nil
+        pendingNote = nil
+        let notesFolderURL = notesFolderURL
         saveQueue.sync {
-            Self.write(snapshot, to: fileURL)
+            if let key {
+                Self.write(note, key: key, to: notesFolderURL)
+            }
         }
     }
 
-    private func scheduleSave() {
+    private func scheduleSave(key: String, note: String?) {
         pendingSave?.cancel()
-        let snapshot = notesByDate
-        let fileURL = fileURL
+        pendingKey = key
+        pendingNote = note
+        let notesFolderURL = notesFolderURL
         let work = DispatchWorkItem {
-            Self.write(snapshot, to: fileURL)
+            Self.write(note, key: key, to: notesFolderURL)
         }
         pendingSave = work
         saveQueue.asyncAfter(deadline: .now() + 0.8, execute: work)
     }
 
-    private static func write(_ notes: [String: String], to fileURL: URL) {
-        guard let data = try? JSONEncoder().encode(notes) else { return }
-        try? data.write(to: fileURL, options: [.atomic])
+    private static func write(_ note: String?, key: String, to folderURL: URL) {
+        let start = CFAbsoluteTimeGetCurrent()
+        let fileURL = folderURL.appendingPathComponent(key).appendingPathExtension("txt")
+        if let note, !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try? note.write(to: fileURL, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+        PerformanceDiagnostics.record(
+            "notes.write-day",
+            milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000,
+            details: "key=\(key) chars=\(note?.count ?? 0)"
+        )
     }
+
+    private func migrateLegacyNotes(_ notes: [String: String]) {
+        let notesFolderURL = notesFolderURL
+        let migrationMarkerURL = migrationMarkerURL
+        saveQueue.async {
+            let start = CFAbsoluteTimeGetCurrent()
+            for (key, note) in notes {
+                Self.write(note, key: key, to: notesFolderURL)
+            }
+            try? Data().write(to: migrationMarkerURL, options: [.atomic])
+            PerformanceDiagnostics.record(
+                "notes.migrate",
+                milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000,
+                details: "days=\(notes.count)"
+            )
+        }
+    }
+
+    #if PERFORMANCE_BENCHMARK
+    func replaceAllForBenchmark(_ notes: [String: String]) {
+        notesByDate = notes
+        for (key, note) in notes {
+            Self.write(note, key: key, to: notesFolderURL)
+        }
+    }
+    #endif
 }
 
 struct RecentInspiration: Identifiable, Equatable {
@@ -749,7 +960,12 @@ enum ChineseCityName {
 }
 
 enum AppBackgroundLibrary {
-    private static let cache = NSCache<NSString, NSImage>()
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = PerformanceTuning.prefersReducedEffects ? 3 : 6
+        cache.totalCostLimit = PerformanceTuning.prefersReducedEffects ? 48 * 1024 * 1024 : 96 * 1024 * 1024
+        return cache
+    }()
 
     static let immersiveBackgroundNames = (1...13).map {
         String(format: "ImmersiveVistaBackground%02d", $0)
@@ -766,7 +982,8 @@ enum AppBackgroundLibrary {
         }
         guard let url = Bundle.main.url(forResource: name, withExtension: fileExtension) else { return nil }
         guard let image = NSImage(contentsOf: url) else { return nil }
-        cache.setObject(image, forKey: key)
+        let pixelCost = Int(max(1, image.size.width) * max(1, image.size.height) * 4)
+        cache.setObject(image, forKey: key, cost: pixelCost)
         return image
     }
 
@@ -1002,6 +1219,7 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
     }
 }
 
+#if !PERFORMANCE_BENCHMARK
 @main
 struct DailyReminderWidgetApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -1010,6 +1228,10 @@ struct DailyReminderWidgetApp: App {
     @StateObject private var iconManager = AppIconManager()
     @StateObject private var weatherStore = WeatherStore()
     @AppStorage("selectedTheme") private var selectedThemeRaw = AppTheme.immersiveVista.rawValue
+
+    init() {
+        PerformanceDiagnostics.markLaunchStart()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -1036,6 +1258,7 @@ struct DailyReminderWidgetApp: App {
         .menuBarExtraStyle(.window)
     }
 }
+#endif
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1078,6 +1301,9 @@ struct ThemePalette {
 
 enum PerformanceTuning {
     static var prefersReducedEffects: Bool {
+        if ProcessInfo.processInfo.isLowPowerModeEnabled {
+            return true
+        }
         #if arch(x86_64)
         return true
         #else
@@ -1564,11 +1790,16 @@ struct GlassPanel: ViewModifier {
         }
     }
 
+    @ViewBuilder
     private var panelMaterial: some View {
-        VisualEffectBlur(material: materialStyle, blendingMode: .withinWindow)
-            .opacity(blurOpacity)
-            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .allowsHitTesting(false)
+        if PerformanceTuning.prefersReducedEffects {
+            Color.clear
+        } else {
+            VisualEffectBlur(material: materialStyle, blendingMode: .withinWindow)
+                .opacity(blurOpacity)
+                .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+                .allowsHitTesting(false)
+        }
     }
 
     private var panelBorder: some View {
@@ -1638,13 +1869,16 @@ struct HoverLiftModifier: ViewModifier {
     @State private var hovering = false
 
     func body(content: Content) -> some View {
+        let shouldAnimate = enabled && !PerformanceTuning.prefersReducedEffects
         content
-            .scaleEffect(enabled && hovering ? 1.018 : 1)
-            .offset(y: enabled && hovering ? -2 : 0)
-            .shadow(color: enabled && hovering ? Color.white.opacity(0.10) : .clear, radius: 16, x: 0, y: 8)
+            .scaleEffect(shouldAnimate && hovering ? 1.018 : 1)
+            .offset(y: shouldAnimate && hovering ? -2 : 0)
+            .shadow(color: shouldAnimate && hovering ? Color.white.opacity(0.10) : .clear, radius: 16, x: 0, y: 8)
             .animation(.spring(response: 0.24, dampingFraction: 0.82), value: hovering)
             .onHover { inside in
-                hovering = inside
+                if shouldAnimate {
+                    hovering = inside
+                }
             }
     }
 }
@@ -2450,7 +2684,7 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.28), value: selectedThemeRaw)
         .animation(.spring(response: 0.30, dampingFraction: 0.84), value: selectedDate)
         .onAppear {
-            NotificationScheduler.shared.reschedule(items: store.items)
+            PerformanceDiagnostics.recordFirstContentIfNeeded()
             iconManager.applySavedIcon()
             showDailyGreetingIfNeeded()
         }
@@ -2999,6 +3233,7 @@ struct MoodNote: View {
 
 struct InspirationSeedCard: View {
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let noteCount: Int
     let compact: Bool
     @State private var animateGlow = false
@@ -3017,10 +3252,10 @@ struct InspirationSeedCard: View {
                 Circle()
                     .fill(theme.palette.accent.opacity(0.16))
                     .frame(width: 132, height: 132)
-                    .blur(radius: animateGlow ? 22 : 32)
-                    .scaleEffect(animateGlow ? 1.10 : 0.94)
+                    .blur(radius: shouldAnimateGlow && animateGlow ? 22 : 30)
+                    .scaleEffect(shouldAnimateGlow && animateGlow ? 1.10 : 0.98)
                     .offset(y: 28)
-                if noteCount > 0 {
+                if noteCount > 0, shouldAnimateGlow {
                     ForEach(0..<sparkleCount, id: \.self) { index in
                         Image(systemName: sparkleSymbol(index))
                             .font(.system(size: CGFloat(8 + index % 3 * 2), weight: .semibold))
@@ -3039,7 +3274,12 @@ struct InspirationSeedCard: View {
                         .resizable()
                         .scaledToFit()
                         .frame(height: compact ? 126 : 152)
-                        .shadow(color: theme.palette.accent.opacity(animateGlow ? 0.42 : 0.24), radius: animateGlow ? 24 : 16, x: 0, y: 10)
+                        .shadow(
+                            color: theme.palette.accent.opacity(shouldAnimateGlow && animateGlow ? 0.42 : 0.24),
+                            radius: shouldAnimateGlow && animateGlow ? 24 : 14,
+                            x: 0,
+                            y: 10
+                        )
                         .padding(.vertical, 8)
                 } else {
                     VStack(spacing: 8) {
@@ -3086,11 +3326,11 @@ struct InspirationSeedCard: View {
         .padding(14)
         .glassPanel(radius: 22, active: noteCount > 0)
         .onAppear {
-            animateGlow = noteCount > 0
+            animateGlow = noteCount > 0 && shouldAnimateGlow
         }
         .onChange(of: noteCount) { value in
             withAnimation(.easeInOut(duration: 0.28)) {
-                animateGlow = value > 0
+                animateGlow = value > 0 && shouldAnimateGlow
             }
         }
     }
@@ -3112,6 +3352,10 @@ struct InspirationSeedCard: View {
 
     private var sparkleCount: Int {
         min(7, max(2, noteCount / 60 + 2))
+    }
+
+    private var shouldAnimateGlow: Bool {
+        !reduceMotion && !PerformanceTuning.prefersReducedEffects
     }
 
     private func sparkleSymbol(_ index: Int) -> String {
@@ -3380,6 +3624,21 @@ enum DailyCapsuleService {
 }
 
 enum InspirationAnalyzer {
+    private final class AnalysisBox: NSObject {
+        let value: InspirationAnalysis
+
+        init(_ value: InspirationAnalysis) {
+            self.value = value
+        }
+    }
+
+    private static let cache: NSCache<NSString, AnalysisBox> = {
+        let cache = NSCache<NSString, AnalysisBox>()
+        cache.countLimit = 512
+        cache.totalCostLimit = 8 * 1024 * 1024
+        return cache
+    }()
+
     private static let keywordCandidates = [
         "用户生态", "平台对接", "用户体系", "UGC社区", "内容发布", "审核机制", "合规备案", "隐私条款", "用户协议", "隐私协议",
         "个人信息", "应用上架", "IPC备案", "APP备案", "公安备案", "技术层面", "安卓签名", "iOS签名", "域名配置",
@@ -3392,6 +3651,7 @@ enum InspirationAnalyzer {
         "开心", "焦虑", "期待", "难过", "平静", "压力", "喜欢", "感谢", "顺利", "卡住",
         "想法", "灵感", "创意", "脑洞", "尝试", "画面", "记录", "学习", "成长", "完成"
     ]
+    private static let sortedKeywordCandidates = keywordCandidates.sorted(by: { $0.count > $1.count })
 
     private static let moodRules: [(String, String, [String])] = [
         ("晴朗", "sun.max.fill", ["开心", "快乐", "顺利", "喜欢", "感谢", "完成", "期待", "舒服", "棒"]),
@@ -3402,6 +3662,11 @@ enum InspirationAnalyzer {
     ]
 
     static func analyze(_ text: String) -> InspirationAnalysis {
+        let cacheKey = NSString(string: text)
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached.value
+        }
+        let start = CFAbsoluteTimeGetCurrent()
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let keywords = extractKeywords(from: cleaned)
 
@@ -3417,9 +3682,19 @@ enum InspirationAnalyzer {
         }.first
 
         if let selectedMood, selectedMood.2 > 0 {
-            return InspirationAnalysis(keywords: keywords, mood: selectedMood.0, moodSymbol: selectedMood.1)
+            let result = InspirationAnalysis(keywords: keywords, mood: selectedMood.0, moodSymbol: selectedMood.1)
+            cache.setObject(AnalysisBox(result), forKey: cacheKey, cost: text.utf8.count)
+            PerformanceDiagnostics.record("inspiration.analyze", milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000, details: "chars=\(text.count)")
+            return result
         }
-        return InspirationAnalysis(keywords: keywords, mood: cleaned.isEmpty ? "待唤醒" : "平稳", moodSymbol: cleaned.isEmpty ? "moon.stars.fill" : "heart.text.square.fill")
+        let result = InspirationAnalysis(
+            keywords: keywords,
+            mood: cleaned.isEmpty ? "待唤醒" : "平稳",
+            moodSymbol: cleaned.isEmpty ? "moon.stars.fill" : "heart.text.square.fill"
+        )
+        cache.setObject(AnalysisBox(result), forKey: cacheKey, cost: text.utf8.count)
+        PerformanceDiagnostics.record("inspiration.analyze", milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1000, details: "chars=\(text.count)")
+        return result
     }
 
     private static func extractKeywords(from text: String) -> [String] {
@@ -3442,7 +3717,7 @@ enum InspirationAnalyzer {
         }
 
         if collected.count < 4 {
-            for candidate in keywordCandidates.sorted(by: { $0.count > $1.count }) where text.localizedCaseInsensitiveContains(candidate) {
+            for candidate in sortedKeywordCandidates where text.localizedCaseInsensitiveContains(candidate) {
                 appendKeyword(candidate, to: &collected)
                 if collected.count == 4 { return collected }
             }
@@ -3622,6 +3897,7 @@ struct IconSettingsSheet: View {
     @EnvironmentObject private var reminderStore: ReminderStore
     @AppStorage("cardOpacityPercent") private var cardOpacityPercent = 20.0
     @AppStorage("cardBlurPercent") private var cardBlurPercent = 45.0
+    @AppStorage("performanceDiagnosticsEnabled") private var performanceDiagnosticsEnabled = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -3660,6 +3936,7 @@ struct IconSettingsSheet: View {
                     PreferenceSection(title: "记录", symbol: "square.and.pencil") {
                         PreferenceInfoRow(title: "今日胶囊自动保存", detail: "输入灵感时会写入本机，每日胶囊不会上传。", symbol: "checkmark.seal")
                         PreferenceInfoRow(title: "灵感字数", detail: "300 字为蓄力目标，单日文本上限为 2000 字。", symbol: "textformat.size")
+                        PerformanceDiagnosticsRow(isEnabled: $performanceDiagnosticsEnabled)
                     }
 
                     PreferenceSection(title: "提醒", symbol: "bell") {
@@ -3695,6 +3972,39 @@ struct IconSettingsSheet: View {
                     .blur(radius: 58)
                     .offset(x: 210, y: -170)
             }
+        )
+    }
+}
+
+struct PerformanceDiagnosticsRow: View {
+    @Environment(\.appTheme) private var theme
+    @Binding var isEnabled: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "gauge.with.dots.needle.50percent")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(theme.palette.accent)
+                .frame(width: 34, height: 34)
+                .background(theme.palette.accent.opacity(0.13), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("本地性能诊断")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(theme.palette.text)
+                Text("记录启动、写盘和文本分析耗时，仅保存在本机。")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+            }
+            Spacer(minLength: 8)
+            Toggle("", isOn: $isEnabled)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .padding(12)
+        .background(theme.palette.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(theme.palette.line, lineWidth: 1)
         )
     }
 }
