@@ -84,6 +84,35 @@ extension Notification.Name {
     static let quickInspirationSaved = Notification.Name("local.codex.lingqi.quickInspirationSaved")
 }
 
+final class WindowRenderState: ObservableObject {
+    static let shared = WindowRenderState()
+
+    @Published private(set) var isLightweightMode = false
+    private var restoreWorkItem: DispatchWorkItem?
+
+    private init() {}
+
+    func prepareForMiniaturize(window: NSWindow?) {
+        restoreWorkItem?.cancel()
+        isLightweightMode = true
+        PerformanceDiagnostics.record("window.miniaturize-prepare", milliseconds: 0)
+        window?.contentView?.needsDisplay = true
+        window?.contentView?.displayIfNeeded()
+    }
+
+    func finishDeminiaturize() {
+        PerformanceDiagnostics.record("window.deminiaturize-finished", milliseconds: 0)
+        restoreWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            withAnimation(.easeOut(duration: 0.16)) {
+                self?.isLightweightMode = false
+            }
+        }
+        restoreWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+}
+
 enum ReminderFrequency: String, CaseIterable, Codable, Identifiable {
     case once
     case daily
@@ -1261,13 +1290,36 @@ struct DailyReminderWidgetApp: App {
 #endif
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var windowObservers: [NSObjectProtocol] = []
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationScheduler.shared.configure()
         NSApp.setActivationPolicy(.regular)
-        for window in NSApplication.shared.windows {
+        configureWindows()
+        DispatchQueue.main.async { [weak self] in
+            self?.configureWindows()
+        }
+        observeWindowTransitions()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        for observer in windowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        windowObservers.removeAll()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    private func configureWindows() {
+        for window in NSApplication.shared.windows where window.level == .normal {
             window.title = "灵栖胶囊Capsule"
             window.isMovableByWindowBackground = true
             window.minSize = defaultWindowSize
+            window.isOpaque = true
+            window.backgroundColor = NSColor(calibratedRed: 0.035, green: 0.060, blue: 0.095, alpha: 1)
             if window.frame.width < defaultWindowSize.width || window.frame.height < defaultWindowSize.height {
                 window.setFrame(NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: defaultWindowSize.width, height: defaultWindowSize.height), display: true)
                 window.center()
@@ -1275,8 +1327,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+    private func observeWindowTransitions() {
+        let center = NotificationCenter.default
+        windowObservers.append(
+            center.addObserver(forName: NSWindow.willMiniaturizeNotification, object: nil, queue: .main) { notification in
+                WindowRenderState.shared.prepareForMiniaturize(window: notification.object as? NSWindow)
+            }
+        )
+        windowObservers.append(
+            center.addObserver(forName: NSWindow.didDeminiaturizeNotification, object: nil, queue: .main) { _ in
+                WindowRenderState.shared.finishDeminiaturize()
+            }
+        )
     }
 }
 
@@ -1711,15 +1773,25 @@ private struct AppThemeKey: EnvironmentKey {
     static let defaultValue: AppTheme = .immersiveVista
 }
 
+private struct LightweightRenderingKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     var appTheme: AppTheme {
         get { self[AppThemeKey.self] }
         set { self[AppThemeKey.self] = newValue }
     }
+
+    var lightweightRendering: Bool {
+        get { self[LightweightRenderingKey.self] }
+        set { self[LightweightRenderingKey.self] = newValue }
+    }
 }
 
 struct GlassPanel: ViewModifier {
     @Environment(\.appTheme) private var theme
+    @Environment(\.lightweightRendering) private var lightweightRendering
     @AppStorage("cardOpacityPercent") private var cardOpacityPercent = 20.0
     @AppStorage("cardBlurPercent") private var cardBlurPercent = 45.0
     var radius: CGFloat = 20
@@ -1730,7 +1802,12 @@ struct GlassPanel: ViewModifier {
             .background(panelMaterial)
             .background(panelBackground)
             .overlay(panelBorder)
-            .shadow(color: panelShadowColor, radius: panelShadowRadius, x: 0, y: 9)
+            .shadow(
+                color: lightweightRendering || PerformanceTuning.prefersReducedEffects ? .clear : panelShadowColor,
+                radius: lightweightRendering || PerformanceTuning.prefersReducedEffects ? 0 : panelShadowRadius,
+                x: 0,
+                y: lightweightRendering || PerformanceTuning.prefersReducedEffects ? 0 : 9
+            )
     }
 
     private var isImmersive: Bool {
@@ -1779,14 +1856,16 @@ struct GlassPanel: ViewModifier {
         ZStack {
             RoundedRectangle(cornerRadius: radius, style: .continuous)
                 .fill(baseFill)
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: gradientColors,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+            if !lightweightRendering {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: gradientColors,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
+            }
         }
     }
 
@@ -1885,12 +1964,13 @@ struct HoverLiftModifier: ViewModifier {
 
 struct AnimatedGlowBackground: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.lightweightRendering) private var lightweightRendering
     let theme: AppTheme
     @State private var animate = false
     @State private var immersiveBackgroundName = AppBackgroundLibrary.randomImmersiveBackgroundName()
 
     var body: some View {
-        let reducedEffects = reduceMotion || PerformanceTuning.prefersReducedEffects
+        let reducedEffects = reduceMotion || PerformanceTuning.prefersReducedEffects || lightweightRendering
         ZStack {
             if theme.backgroundStyle == .immersiveScene {
                 immersiveSceneBackground(reducedEffects: reducedEffects)
@@ -1943,21 +2023,25 @@ struct AnimatedGlowBackground: View {
                 }
 
                 Color.black.opacity(0.28)
-                LinearGradient(
-                    colors: [
-                        Color.black.opacity(0.50),
-                        Color.black.opacity(0.18),
-                        theme.palette.ink.opacity(0.70)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                RadialGradient(
-                    colors: [theme.palette.warm.opacity(0.18), .clear],
-                    center: .topTrailing,
-                    startRadius: 20,
-                    endRadius: 720
-                )
+                if !lightweightRendering {
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.50),
+                            Color.black.opacity(0.18),
+                            theme.palette.ink.opacity(0.70)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    RadialGradient(
+                        colors: [theme.palette.warm.opacity(0.18), .clear],
+                        center: .topTrailing,
+                        startRadius: 20,
+                        endRadius: 720
+                    )
+                } else {
+                    theme.palette.ink.opacity(0.34)
+                }
 
                 if !reducedEffects {
                     ForEach(0..<8, id: \.self) { index in
@@ -2614,6 +2698,7 @@ struct QuickSecondaryButtonStyle: ButtonStyle {
 struct ContentView: View {
     @EnvironmentObject private var store: ReminderStore
     @EnvironmentObject private var iconManager: AppIconManager
+    @ObservedObject private var windowRenderState = WindowRenderState.shared
     @AppStorage("selectedTheme") private var selectedThemeRaw = AppTheme.immersiveVista.rawValue
     @State private var selectedDate = Date()
     @State private var showingEditor = false
@@ -2679,6 +2764,7 @@ struct ContentView: View {
                 }
             }
             .environment(\.appTheme, theme)
+            .environment(\.lightweightRendering, windowRenderState.isLightweightMode)
         }
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.28), value: selectedThemeRaw)
@@ -3275,10 +3361,10 @@ struct InspirationSeedCard: View {
                         .scaledToFit()
                         .frame(height: compact ? 126 : 152)
                         .shadow(
-                            color: theme.palette.accent.opacity(shouldAnimateGlow && animateGlow ? 0.42 : 0.24),
-                            radius: shouldAnimateGlow && animateGlow ? 24 : 14,
+                            color: PerformanceTuning.prefersReducedEffects ? .clear : theme.palette.accent.opacity(shouldAnimateGlow && animateGlow ? 0.42 : 0.24),
+                            radius: PerformanceTuning.prefersReducedEffects ? 0 : (shouldAnimateGlow && animateGlow ? 24 : 14),
                             x: 0,
-                            y: 10
+                            y: PerformanceTuning.prefersReducedEffects ? 0 : 10
                         )
                         .padding(.vertical, 8)
                 } else {
@@ -3302,7 +3388,12 @@ struct InspirationSeedCard: View {
                         .padding(.vertical, 6)
                         .background(theme.palette.cardStrong.opacity(0.88), in: Capsule())
                         .overlay(Capsule().stroke(theme.palette.accent.opacity(0.24), lineWidth: 1))
-                        .shadow(color: theme.palette.accent.opacity(0.18), radius: 10, x: 0, y: 4)
+                        .shadow(
+                            color: PerformanceTuning.prefersReducedEffects ? .clear : theme.palette.accent.opacity(0.18),
+                            radius: PerformanceTuning.prefersReducedEffects ? 0 : 10,
+                            x: 0,
+                            y: PerformanceTuning.prefersReducedEffects ? 0 : 4
+                        )
                         .offset(y: compact ? 54 : 64)
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 }
@@ -5071,6 +5162,7 @@ struct CapsuleHeroActionButton: View {
 
 struct CapsuleOrb: View {
     @Environment(\.appTheme) private var theme
+    @Environment(\.lightweightRendering) private var lightweightRendering
     let status: CapsuleStatus
     let progress: Double
     let size: CGFloat
@@ -5098,7 +5190,12 @@ struct CapsuleOrb: View {
                 .foregroundStyle(Color.white.opacity(0.92))
         }
         .frame(width: size, height: size)
-        .shadow(color: theme.palette.accent.opacity(0.24), radius: 18, x: 0, y: 8)
+        .shadow(
+            color: lightweightRendering || PerformanceTuning.prefersReducedEffects ? .clear : theme.palette.accent.opacity(0.24),
+            radius: lightweightRendering || PerformanceTuning.prefersReducedEffects ? 0 : 18,
+            x: 0,
+            y: lightweightRendering || PerformanceTuning.prefersReducedEffects ? 0 : 8
+        )
     }
 }
 
