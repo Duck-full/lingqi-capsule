@@ -1277,7 +1277,10 @@ struct DailyReminderWidgetApp: App {
             CommandGroup(replacing: .newItem) { }
         }
 
-        MenuBarExtra("灵栖胶囊Capsule", systemImage: "leaf.fill") {
+        MenuBarExtra(
+            "灵栖胶囊Capsule",
+            systemImage: (AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista).symbol(.theme)
+        ) {
             MenuBarQuickPanel()
                 .environmentObject(store)
                 .environmentObject(noteStore)
@@ -2331,18 +2334,23 @@ struct MenuBarQuickPanel: View {
 }
 
 enum QuickPanelStyle {
-    static let backgroundTop = Color(red: 0.055, green: 0.085, blue: 0.135)
-    static let backgroundBottom = Color(red: 0.070, green: 0.095, blue: 0.150)
-    static let card = Color.white.opacity(0.075)
-    static let cardStrong = Color.white.opacity(0.105)
-    static let stroke = Color.white.opacity(0.14)
-    static let strokeActive = Color(red: 0.54, green: 0.70, blue: 1.0).opacity(0.55)
-    static let text = Color(red: 0.972, green: 0.980, blue: 0.988)
-    static let subText = Color(red: 0.58, green: 0.64, blue: 0.72)
-    static let weakText = Color(red: 0.40, green: 0.46, blue: 0.55)
-    static let blue = Color(red: 0.54, green: 0.70, blue: 1.0)
-    static let green = Color(red: 0.65, green: 0.95, blue: 0.82)
-    static let purple = Color(red: 0.75, green: 0.52, blue: 0.99)
+    private static var theme: AppTheme {
+        let rawValue = UserDefaults.standard.string(forKey: "selectedTheme")
+        return AppTheme(rawValue: rawValue ?? "") ?? .immersiveVista
+    }
+
+    static var backgroundTop: Color { theme.palette.ink }
+    static var backgroundBottom: Color { theme.palette.plum }
+    static var card: Color { theme.palette.card }
+    static var cardStrong: Color { theme.palette.cardStrong }
+    static var stroke: Color { theme.palette.line }
+    static var strokeActive: Color { theme.palette.accent.opacity(0.58) }
+    static var text: Color { theme.palette.text }
+    static var subText: Color { theme.palette.muted }
+    static var weakText: Color { theme.palette.muted.opacity(0.62) }
+    static var blue: Color { theme.palette.accent }
+    static var green: Color { theme.palette.accent2 }
+    static var purple: Color { theme.palette.glowB }
 }
 
 struct QuickPanelBackground: View {
@@ -2389,7 +2397,7 @@ struct QuickPanelHeader: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "leaf.fill")
+            Image(systemName: theme.symbol(.theme))
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(QuickPanelStyle.green)
                 .frame(width: 32, height: 32)
@@ -2480,8 +2488,8 @@ struct QuickInspirationInputView: View {
                     Text("快速记录此刻的灵感…")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(QuickPanelStyle.weakText)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 13)
+                        .padding(.leading, 5)
+                        .padding(.top, 8)
                 }
                 TextEditor(text: $text)
                     .font(.system(size: 14))
@@ -2616,13 +2624,8 @@ struct RecentInspirationListView: View {
 }
 
 struct QuickActionGridView: View {
+    @Environment(\.appTheme) private var theme
     let action: (QuickPanelRoute) -> Void
-    private let items: [(QuickPanelRoute, String, String)] = [
-        (.summary, "今日总结", "doc.text.magnifyingglass"),
-        (.history, "历史胶囊", "archivebox"),
-        (.theme, "主题换肤", "paintpalette"),
-        (.settings, "设置中心", "gearshape")
-    ]
 
     var body: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
@@ -2632,6 +2635,15 @@ struct QuickActionGridView: View {
                 }
             }
         }
+    }
+
+    private var items: [(QuickPanelRoute, String, String)] {
+        [
+            (.summary, "今日总结", theme.symbol(.note)),
+            (.history, "历史胶囊", "archivebox"),
+            (.theme, "主题换肤", theme.symbol(.theme)),
+            (.settings, "设置中心", "gearshape")
+        ]
     }
 }
 
@@ -5034,8 +5046,8 @@ struct TodayCapsuleHeroCard: View {
                     Text("写下今天闪过的一个想法……")
                         .font(.system(size: compact ? 12 : 13, weight: .medium))
                         .foregroundStyle(theme.palette.muted.opacity(0.62))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 15)
+                        .padding(.leading, 5)
+                        .padding(.top, 8)
                 }
                 TextEditor(text: $draft)
                     .font(.system(size: compact ? 12 : 13))
@@ -6101,18 +6113,54 @@ struct ReminderEditor: View {
                 .buttonStyle(IconButtonStyle())
             }
 
-            VStack(alignment: .leading, spacing: 18) {
-                FormFieldTitle("事项")
-                TextField("例如：喝水、复盘、给客户回电话", text: $title)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 16))
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 9) {
+                    FormFieldTitle("事项")
+                    TextField("例如：喝水、复盘、给客户回电话", text: $title)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(theme.palette.text)
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 50)
+                        .background(
+                            theme.palette.ink.opacity(0.28),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(title.isEmpty ? theme.palette.line : theme.palette.accent.opacity(0.44), lineWidth: 1)
+                        )
+                }
 
-                FormFieldTitle("备注")
-                TextField("可选，可写下这件事的背景或补充信息", text: $notes, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(4)
+                VStack(alignment: .leading, spacing: 9) {
+                    FormFieldTitle("备注")
+                    ZStack(alignment: .topLeading) {
+                        if notes.isEmpty {
+                            Text("可选，可写下这件事的背景或补充信息")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(theme.palette.muted.opacity(0.60))
+                                .padding(.leading, 5)
+                                .padding(.top, 8)
+                        }
+                        TextEditor(text: $notes)
+                            .font(.system(size: 14))
+                            .foregroundStyle(theme.palette.text)
+                            .scrollContentBackground(.hidden)
+                            .background(Color.clear)
+                    }
+                    .padding(10)
+                    .frame(minHeight: 104)
+                    .background(
+                        theme.palette.ink.opacity(0.28),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(notes.isEmpty ? theme.palette.line : theme.palette.accent.opacity(0.38), lineWidth: 1)
+                    )
+                }
 
-                HStack(spacing: 18) {
+                HStack(spacing: 20) {
                     VStack(alignment: .leading, spacing: 8) {
                         FormFieldTitle("日期")
                         DatePicker("", selection: $date, displayedComponents: .date)
@@ -6127,7 +6175,7 @@ struct ReminderEditor: View {
                     }
                 }
             }
-            .padding(20)
+            .padding(24)
             .glassPanel(radius: 20)
 
             VStack(alignment: .leading, spacing: 14) {
