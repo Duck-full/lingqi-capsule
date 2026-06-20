@@ -84,6 +84,35 @@ extension Notification.Name {
     static let quickInspirationSaved = Notification.Name("local.codex.lingqi.quickInspirationSaved")
 }
 
+final class WindowRenderState: ObservableObject {
+    static let shared = WindowRenderState()
+
+    @Published private(set) var isLightweightMode = false
+    private var restoreWorkItem: DispatchWorkItem?
+
+    private init() {}
+
+    func prepareForMiniaturize(window: NSWindow?) {
+        restoreWorkItem?.cancel()
+        isLightweightMode = true
+        PerformanceDiagnostics.record("window.miniaturize-prepare", milliseconds: 0)
+        window?.contentView?.needsDisplay = true
+        window?.contentView?.displayIfNeeded()
+    }
+
+    func finishDeminiaturize() {
+        PerformanceDiagnostics.record("window.deminiaturize-finished", milliseconds: 0)
+        restoreWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            withAnimation(.easeOut(duration: 0.16)) {
+                self?.isLightweightMode = false
+            }
+        }
+        restoreWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+}
+
 enum ReminderFrequency: String, CaseIterable, Codable, Identifiable {
     case once
     case daily
@@ -1248,7 +1277,10 @@ struct DailyReminderWidgetApp: App {
             CommandGroup(replacing: .newItem) { }
         }
 
-        MenuBarExtra("灵栖胶囊Capsule", systemImage: "leaf.fill") {
+        MenuBarExtra(
+            "灵栖胶囊Capsule",
+            systemImage: (AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista).symbol(.theme)
+        ) {
             MenuBarQuickPanel()
                 .environmentObject(store)
                 .environmentObject(noteStore)
@@ -1261,13 +1293,36 @@ struct DailyReminderWidgetApp: App {
 #endif
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var windowObservers: [NSObjectProtocol] = []
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationScheduler.shared.configure()
         NSApp.setActivationPolicy(.regular)
-        for window in NSApplication.shared.windows {
+        configureWindows()
+        DispatchQueue.main.async { [weak self] in
+            self?.configureWindows()
+        }
+        observeWindowTransitions()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        for observer in windowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        windowObservers.removeAll()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    private func configureWindows() {
+        for window in NSApplication.shared.windows where window.level == .normal {
             window.title = "灵栖胶囊Capsule"
             window.isMovableByWindowBackground = true
             window.minSize = defaultWindowSize
+            window.isOpaque = true
+            window.backgroundColor = NSColor(calibratedRed: 0.035, green: 0.060, blue: 0.095, alpha: 1)
             if window.frame.width < defaultWindowSize.width || window.frame.height < defaultWindowSize.height {
                 window.setFrame(NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: defaultWindowSize.width, height: defaultWindowSize.height), display: true)
                 window.center()
@@ -1275,8 +1330,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+    private func observeWindowTransitions() {
+        let center = NotificationCenter.default
+        windowObservers.append(
+            center.addObserver(forName: NSWindow.willMiniaturizeNotification, object: nil, queue: .main) { notification in
+                WindowRenderState.shared.prepareForMiniaturize(window: notification.object as? NSWindow)
+            }
+        )
+        windowObservers.append(
+            center.addObserver(forName: NSWindow.didDeminiaturizeNotification, object: nil, queue: .main) { _ in
+                WindowRenderState.shared.finishDeminiaturize()
+            }
+        )
     }
 }
 
@@ -1711,15 +1776,25 @@ private struct AppThemeKey: EnvironmentKey {
     static let defaultValue: AppTheme = .immersiveVista
 }
 
+private struct LightweightRenderingKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     var appTheme: AppTheme {
         get { self[AppThemeKey.self] }
         set { self[AppThemeKey.self] = newValue }
     }
+
+    var lightweightRendering: Bool {
+        get { self[LightweightRenderingKey.self] }
+        set { self[LightweightRenderingKey.self] = newValue }
+    }
 }
 
 struct GlassPanel: ViewModifier {
     @Environment(\.appTheme) private var theme
+    @Environment(\.lightweightRendering) private var lightweightRendering
     @AppStorage("cardOpacityPercent") private var cardOpacityPercent = 20.0
     @AppStorage("cardBlurPercent") private var cardBlurPercent = 45.0
     var radius: CGFloat = 20
@@ -1730,7 +1805,12 @@ struct GlassPanel: ViewModifier {
             .background(panelMaterial)
             .background(panelBackground)
             .overlay(panelBorder)
-            .shadow(color: panelShadowColor, radius: panelShadowRadius, x: 0, y: 9)
+            .shadow(
+                color: lightweightRendering || PerformanceTuning.prefersReducedEffects ? .clear : panelShadowColor,
+                radius: lightweightRendering || PerformanceTuning.prefersReducedEffects ? 0 : panelShadowRadius,
+                x: 0,
+                y: lightweightRendering || PerformanceTuning.prefersReducedEffects ? 0 : 9
+            )
     }
 
     private var isImmersive: Bool {
@@ -1779,14 +1859,16 @@ struct GlassPanel: ViewModifier {
         ZStack {
             RoundedRectangle(cornerRadius: radius, style: .continuous)
                 .fill(baseFill)
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: gradientColors,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+            if !lightweightRendering {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: gradientColors,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
+            }
         }
     }
 
@@ -1885,12 +1967,13 @@ struct HoverLiftModifier: ViewModifier {
 
 struct AnimatedGlowBackground: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.lightweightRendering) private var lightweightRendering
     let theme: AppTheme
     @State private var animate = false
     @State private var immersiveBackgroundName = AppBackgroundLibrary.randomImmersiveBackgroundName()
 
     var body: some View {
-        let reducedEffects = reduceMotion || PerformanceTuning.prefersReducedEffects
+        let reducedEffects = reduceMotion || PerformanceTuning.prefersReducedEffects || lightweightRendering
         ZStack {
             if theme.backgroundStyle == .immersiveScene {
                 immersiveSceneBackground(reducedEffects: reducedEffects)
@@ -1943,21 +2026,25 @@ struct AnimatedGlowBackground: View {
                 }
 
                 Color.black.opacity(0.28)
-                LinearGradient(
-                    colors: [
-                        Color.black.opacity(0.50),
-                        Color.black.opacity(0.18),
-                        theme.palette.ink.opacity(0.70)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                RadialGradient(
-                    colors: [theme.palette.warm.opacity(0.18), .clear],
-                    center: .topTrailing,
-                    startRadius: 20,
-                    endRadius: 720
-                )
+                if !lightweightRendering {
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.50),
+                            Color.black.opacity(0.18),
+                            theme.palette.ink.opacity(0.70)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    RadialGradient(
+                        colors: [theme.palette.warm.opacity(0.18), .clear],
+                        center: .topTrailing,
+                        startRadius: 20,
+                        endRadius: 720
+                    )
+                } else {
+                    theme.palette.ink.opacity(0.34)
+                }
 
                 if !reducedEffects {
                     ForEach(0..<8, id: \.self) { index in
@@ -2247,18 +2334,23 @@ struct MenuBarQuickPanel: View {
 }
 
 enum QuickPanelStyle {
-    static let backgroundTop = Color(red: 0.055, green: 0.085, blue: 0.135)
-    static let backgroundBottom = Color(red: 0.070, green: 0.095, blue: 0.150)
-    static let card = Color.white.opacity(0.075)
-    static let cardStrong = Color.white.opacity(0.105)
-    static let stroke = Color.white.opacity(0.14)
-    static let strokeActive = Color(red: 0.54, green: 0.70, blue: 1.0).opacity(0.55)
-    static let text = Color(red: 0.972, green: 0.980, blue: 0.988)
-    static let subText = Color(red: 0.58, green: 0.64, blue: 0.72)
-    static let weakText = Color(red: 0.40, green: 0.46, blue: 0.55)
-    static let blue = Color(red: 0.54, green: 0.70, blue: 1.0)
-    static let green = Color(red: 0.65, green: 0.95, blue: 0.82)
-    static let purple = Color(red: 0.75, green: 0.52, blue: 0.99)
+    private static var theme: AppTheme {
+        let rawValue = UserDefaults.standard.string(forKey: "selectedTheme")
+        return AppTheme(rawValue: rawValue ?? "") ?? .immersiveVista
+    }
+
+    static var backgroundTop: Color { theme.palette.ink }
+    static var backgroundBottom: Color { theme.palette.plum }
+    static var card: Color { theme.palette.card }
+    static var cardStrong: Color { theme.palette.cardStrong }
+    static var stroke: Color { theme.palette.line }
+    static var strokeActive: Color { theme.palette.accent.opacity(0.58) }
+    static var text: Color { theme.palette.text }
+    static var subText: Color { theme.palette.muted }
+    static var weakText: Color { theme.palette.muted.opacity(0.62) }
+    static var blue: Color { theme.palette.accent }
+    static var green: Color { theme.palette.accent2 }
+    static var purple: Color { theme.palette.glowB }
 }
 
 struct QuickPanelBackground: View {
@@ -2305,7 +2397,7 @@ struct QuickPanelHeader: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "leaf.fill")
+            Image(systemName: theme.symbol(.theme))
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(QuickPanelStyle.green)
                 .frame(width: 32, height: 32)
@@ -2396,8 +2488,8 @@ struct QuickInspirationInputView: View {
                     Text("快速记录此刻的灵感…")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(QuickPanelStyle.weakText)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 13)
+                        .padding(.leading, 5)
+                        .padding(.top, 8)
                 }
                 TextEditor(text: $text)
                     .font(.system(size: 14))
@@ -2532,13 +2624,8 @@ struct RecentInspirationListView: View {
 }
 
 struct QuickActionGridView: View {
+    @Environment(\.appTheme) private var theme
     let action: (QuickPanelRoute) -> Void
-    private let items: [(QuickPanelRoute, String, String)] = [
-        (.summary, "今日总结", "doc.text.magnifyingglass"),
-        (.history, "历史胶囊", "archivebox"),
-        (.theme, "主题换肤", "paintpalette"),
-        (.settings, "设置中心", "gearshape")
-    ]
 
     var body: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
@@ -2548,6 +2635,15 @@ struct QuickActionGridView: View {
                 }
             }
         }
+    }
+
+    private var items: [(QuickPanelRoute, String, String)] {
+        [
+            (.summary, "今日总结", theme.symbol(.note)),
+            (.history, "历史胶囊", "archivebox"),
+            (.theme, "主题换肤", theme.symbol(.theme)),
+            (.settings, "设置中心", "gearshape")
+        ]
     }
 }
 
@@ -2614,6 +2710,7 @@ struct QuickSecondaryButtonStyle: ButtonStyle {
 struct ContentView: View {
     @EnvironmentObject private var store: ReminderStore
     @EnvironmentObject private var iconManager: AppIconManager
+    @ObservedObject private var windowRenderState = WindowRenderState.shared
     @AppStorage("selectedTheme") private var selectedThemeRaw = AppTheme.immersiveVista.rawValue
     @State private var selectedDate = Date()
     @State private var showingEditor = false
@@ -2679,6 +2776,7 @@ struct ContentView: View {
                 }
             }
             .environment(\.appTheme, theme)
+            .environment(\.lightweightRendering, windowRenderState.isLightweightMode)
         }
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.28), value: selectedThemeRaw)
@@ -3275,10 +3373,10 @@ struct InspirationSeedCard: View {
                         .scaledToFit()
                         .frame(height: compact ? 126 : 152)
                         .shadow(
-                            color: theme.palette.accent.opacity(shouldAnimateGlow && animateGlow ? 0.42 : 0.24),
-                            radius: shouldAnimateGlow && animateGlow ? 24 : 14,
+                            color: PerformanceTuning.prefersReducedEffects ? .clear : theme.palette.accent.opacity(shouldAnimateGlow && animateGlow ? 0.42 : 0.24),
+                            radius: PerformanceTuning.prefersReducedEffects ? 0 : (shouldAnimateGlow && animateGlow ? 24 : 14),
                             x: 0,
-                            y: 10
+                            y: PerformanceTuning.prefersReducedEffects ? 0 : 10
                         )
                         .padding(.vertical, 8)
                 } else {
@@ -3302,7 +3400,12 @@ struct InspirationSeedCard: View {
                         .padding(.vertical, 6)
                         .background(theme.palette.cardStrong.opacity(0.88), in: Capsule())
                         .overlay(Capsule().stroke(theme.palette.accent.opacity(0.24), lineWidth: 1))
-                        .shadow(color: theme.palette.accent.opacity(0.18), radius: 10, x: 0, y: 4)
+                        .shadow(
+                            color: PerformanceTuning.prefersReducedEffects ? .clear : theme.palette.accent.opacity(0.18),
+                            radius: PerformanceTuning.prefersReducedEffects ? 0 : 10,
+                            x: 0,
+                            y: PerformanceTuning.prefersReducedEffects ? 0 : 4
+                        )
                         .offset(y: compact ? 54 : 64)
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 }
@@ -4943,8 +5046,8 @@ struct TodayCapsuleHeroCard: View {
                     Text("写下今天闪过的一个想法……")
                         .font(.system(size: compact ? 12 : 13, weight: .medium))
                         .foregroundStyle(theme.palette.muted.opacity(0.62))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 15)
+                        .padding(.leading, 5)
+                        .padding(.top, 8)
                 }
                 TextEditor(text: $draft)
                     .font(.system(size: compact ? 12 : 13))
@@ -5071,6 +5174,7 @@ struct CapsuleHeroActionButton: View {
 
 struct CapsuleOrb: View {
     @Environment(\.appTheme) private var theme
+    @Environment(\.lightweightRendering) private var lightweightRendering
     let status: CapsuleStatus
     let progress: Double
     let size: CGFloat
@@ -5098,7 +5202,12 @@ struct CapsuleOrb: View {
                 .foregroundStyle(Color.white.opacity(0.92))
         }
         .frame(width: size, height: size)
-        .shadow(color: theme.palette.accent.opacity(0.24), radius: 18, x: 0, y: 8)
+        .shadow(
+            color: lightweightRendering || PerformanceTuning.prefersReducedEffects ? .clear : theme.palette.accent.opacity(0.24),
+            radius: lightweightRendering || PerformanceTuning.prefersReducedEffects ? 0 : 18,
+            x: 0,
+            y: lightweightRendering || PerformanceTuning.prefersReducedEffects ? 0 : 8
+        )
     }
 }
 
@@ -6004,18 +6113,54 @@ struct ReminderEditor: View {
                 .buttonStyle(IconButtonStyle())
             }
 
-            VStack(alignment: .leading, spacing: 18) {
-                FormFieldTitle("事项")
-                TextField("例如：喝水、复盘、给客户回电话", text: $title)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 16))
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 9) {
+                    FormFieldTitle("事项")
+                    TextField("例如：喝水、复盘、给客户回电话", text: $title)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(theme.palette.text)
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 50)
+                        .background(
+                            theme.palette.ink.opacity(0.28),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(title.isEmpty ? theme.palette.line : theme.palette.accent.opacity(0.44), lineWidth: 1)
+                        )
+                }
 
-                FormFieldTitle("备注")
-                TextField("可选，可写下这件事的背景或补充信息", text: $notes, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(4)
+                VStack(alignment: .leading, spacing: 9) {
+                    FormFieldTitle("备注")
+                    ZStack(alignment: .topLeading) {
+                        if notes.isEmpty {
+                            Text("可选，可写下这件事的背景或补充信息")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(theme.palette.muted.opacity(0.60))
+                                .padding(.leading, 5)
+                                .padding(.top, 8)
+                        }
+                        TextEditor(text: $notes)
+                            .font(.system(size: 14))
+                            .foregroundStyle(theme.palette.text)
+                            .scrollContentBackground(.hidden)
+                            .background(Color.clear)
+                    }
+                    .padding(10)
+                    .frame(minHeight: 104)
+                    .background(
+                        theme.palette.ink.opacity(0.28),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(notes.isEmpty ? theme.palette.line : theme.palette.accent.opacity(0.38), lineWidth: 1)
+                    )
+                }
 
-                HStack(spacing: 18) {
+                HStack(spacing: 20) {
                     VStack(alignment: .leading, spacing: 8) {
                         FormFieldTitle("日期")
                         DatePicker("", selection: $date, displayedComponents: .date)
@@ -6030,7 +6175,7 @@ struct ReminderEditor: View {
                     }
                 }
             }
-            .padding(20)
+            .padding(24)
             .glassPanel(radius: 20)
 
             VStack(alignment: .leading, spacing: 14) {
