@@ -1,6 +1,6 @@
 # 隐私说明
 
-灵栖胶囊 Capsule 是本地优先的 macOS 桌面小组件。
+灵栖胶囊 Capsule 是本地优先的灵感与行动记录工具，支持 macOS 桌面端和 iPhone 端。
 
 ## 本地保存的数据
 
@@ -33,4 +33,15 @@
 
 ## 删除数据
 
-当前版本不提供一键清空全部数据入口。可在应用内删除事项、清空某日灵感文本，或手动删除 Application Support 中的本地数据文件。
+macOS 当前版本不提供一键清空全部数据入口。可在应用内删除事项、清空某日灵感文本，或手动删除 Application Support 中的本地数据文件。
+
+# iPhone 与 iCloud
+
+iPhone 版本使用 SwiftData 与用户私人 CloudKit 数据库保存灵感和事项，用于离线存储及 Mac、iPhone 跨设备同步：
+
+- 数据归属于用户当前登录的 Apple ID。
+- 应用不建立独立账号，不收集账号密码。
+- 应用开发者默认无法读取用户私人 CloudKit 数据。
+- 用户可通过系统 iCloud 设置控制同步，并可在系统中管理相关数据。
+- 从 Mac 导入的一次性迁移包只会写入本机数据库及用户私人 CloudKit。
+- 在 iPhone 中删除灵感或事项后，删除结果会通过私人 CloudKit 同步到同一 Apple ID 下的设备。

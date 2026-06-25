@@ -22,6 +22,8 @@ DerivedData/
 *.log
 *.tmp
 *.bak
+__pycache__/
+*.pyc
 
 # Local scratch files used during visual iteration
 /work/*.swift
