@@ -135,6 +135,15 @@ enum ReminderFrequency: String, CaseIterable, Codable, Identifiable {
         case .customHours: return "每隔几小时"
         }
     }
+
+    var isCalendarRecurring: Bool {
+        switch self {
+        case .daily, .weekdays, .weekly, .monthly:
+            return true
+        case .once, .customMinutes, .customHours:
+            return false
+        }
+    }
 }
 
 struct ReminderItem: Codable, Identifiable, Equatable {
@@ -149,6 +158,28 @@ struct ReminderItem: Codable, Identifiable, Equatable {
     var createdAt: Date = Date()
 }
 
+extension ReminderItem {
+    func occurs(on day: Date, calendar: Calendar = .current) -> Bool {
+        let startOfDay = calendar.startOfDay(for: day)
+        let startDate = calendar.startOfDay(for: date)
+        guard startOfDay >= startDate else { return false }
+
+        switch frequency {
+        case .once, .customMinutes, .customHours:
+            return calendar.isDate(day, inSameDayAs: date)
+        case .daily:
+            return true
+        case .weekdays:
+            let weekday = calendar.component(.weekday, from: day)
+            return (2...6).contains(weekday)
+        case .weekly:
+            return calendar.component(.weekday, from: day) == calendar.component(.weekday, from: date)
+        case .monthly:
+            return calendar.component(.day, from: day) == calendar.component(.day, from: date)
+        }
+    }
+}
+
 final class ReminderStore: ObservableObject {
     @Published private(set) var items: [ReminderItem] = []
 
@@ -156,6 +187,7 @@ final class ReminderStore: ObservableObject {
     private let schedulesNotifications: Bool
     private let saveQueue = DispatchQueue(label: "local.codex.lingqi.reminders.save", qos: .utility)
     private var itemsByDay: [String: [ReminderItem]] = [:]
+    private var recurringItems: [ReminderItem] = []
     private var pendingSave: DispatchWorkItem?
     private var terminationObserver: NSObjectProtocol?
 
@@ -183,6 +215,7 @@ final class ReminderStore: ObservableObject {
         items.append(item)
         sort()
         addToDayIndex(item)
+        rebuildRecurringIndex()
         persistAndSchedule(item)
     }
 
@@ -193,12 +226,14 @@ final class ReminderStore: ObservableObject {
         sort()
         removeFromDayIndex(previousItem)
         addToDayIndex(item)
+        rebuildRecurringIndex()
         persistAndSchedule(item)
     }
 
     func delete(_ item: ReminderItem) {
         items.removeAll { $0.id == item.id }
         removeFromDayIndex(item)
+        rebuildRecurringIndex()
         persist()
         if schedulesNotifications {
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: NotificationScheduler.identifiers(for: item))
@@ -209,15 +244,21 @@ final class ReminderStore: ObservableObject {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[index].isDone.toggle()
         updateDayIndex(items[index])
+        rebuildRecurringIndex()
         persistAndSchedule(items[index])
     }
 
     func items(on day: Date) -> [ReminderItem] {
-        itemsByDay[DateKey.string(from: day)] ?? []
+        let exactItems = itemsByDay[DateKey.string(from: day)] ?? []
+        let exactIDs = Set(exactItems.map(\.id))
+        let recurringMatches = recurringItems.filter { item in
+            !exactIDs.contains(item.id) && item.occurs(on: day)
+        }
+        return (exactItems + recurringMatches).sorted { $0.remindAt < $1.remindAt }
     }
 
     func count(on day: Date) -> Int {
-        itemsByDay[DateKey.string(from: day)]?.count ?? 0
+        items(on: day).count
     }
 
     private func sort() {
@@ -243,6 +284,7 @@ final class ReminderStore: ObservableObject {
         } catch {
             items = []
             itemsByDay = [:]
+            recurringItems = []
         }
     }
 
@@ -298,6 +340,13 @@ final class ReminderStore: ObservableObject {
     private func rebuildDayIndex() {
         itemsByDay = Dictionary(grouping: items, by: { DateKey.string(from: $0.date) })
             .mapValues { $0.sorted { $0.remindAt < $1.remindAt } }
+        rebuildRecurringIndex()
+    }
+
+    private func rebuildRecurringIndex() {
+        recurringItems = items
+            .filter { $0.frequency.isCalendarRecurring }
+            .sorted { $0.remindAt < $1.remindAt }
     }
 
     private func addToDayIndex(_ item: ReminderItem) {
@@ -622,7 +671,7 @@ enum NoteExporter {
 
     static func exportPDF(note: String, date: Date) {
         guard let destination = saveURL(extensionName: "pdf", date: date) else { return }
-        let view = NotePDFView(dateTitle: DateKey.display(from: date), note: note)
+        let view = NotePDFView(dateTitle: DateKey.display(from: date), note: readableNote(note))
         let data = view.dataWithPDF(inside: view.bounds)
         do {
             try data.write(to: destination, options: [.atomic])
@@ -653,22 +702,30 @@ enum NoteExporter {
     }
 
     private static func htmlDocument(note: String, date: Date) -> String {
-        """
+        let body = htmlNoteBody(note)
+        return """
         <!doctype html>
         <html>
         <head>
           <meta charset="utf-8">
           <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif; line-height: 1.65; color: #1f1f24; }
-            h1 { font-size: 24px; margin-bottom: 4px; }
-            .date { color: #666; margin-bottom: 24px; }
-            .note { white-space: pre-wrap; font-size: 15px; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif; line-height: 1.72; color: #1f1f24; max-width: 760px; margin: 40px auto; }
+            h1 { font-size: 25px; margin-bottom: 4px; letter-spacing: 0; }
+            h2 { font-size: 18px; margin: 24px 0 10px; }
+            .date { color: #666; margin-bottom: 28px; }
+            .note { font-size: 15px; }
+            p { margin: 0 0 12px; }
+            .bullet { padding-left: 16px; text-indent: -12px; }
+            .numbered { padding-left: 16px; }
+            .quote { margin: 12px 0 16px; padding: 10px 14px; border-left: 4px solid #8ab4ff; background: #f3f6fb; color: #3f4652; border-radius: 8px; }
+            .empty { color: #777; }
+            hr { border: none; border-top: 1px solid #d8dee8; margin: 22px 0; }
           </style>
         </head>
         <body>
           <h1>今日灵感胶囊</h1>
           <div class="date">\(escape(DateKey.display(from: date)))</div>
-          <div class="note">\(escape(note))</div>
+          <div class="note">\(body)</div>
         </body>
         </html>
         """
@@ -737,6 +794,84 @@ enum NoteExporter {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         return formatter.string(from: date)
+    }
+
+    private static func readableNote(_ note: String) -> String {
+        let trimmedLines = note
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+
+        var result: [String] = []
+        var previousWasBlank = false
+        for line in trimmedLines {
+            let normalized = readableLine(line)
+            if normalized.isEmpty {
+                if !previousWasBlank, !result.isEmpty {
+                    result.append("")
+                }
+                previousWasBlank = true
+            } else {
+                result.append(normalized)
+                previousWasBlank = false
+            }
+        }
+        return result.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func readableLine(_ line: String) -> String {
+        if line.hasPrefix("## ") {
+            return line.replacingOccurrences(of: "## ", with: "")
+        }
+        if line.hasPrefix("> ") {
+            return line.replacingOccurrences(of: "> ", with: "引用：")
+        }
+        if line == "---" {
+            return "----------------"
+        }
+        return line
+    }
+
+    private static func htmlNoteBody(_ note: String) -> String {
+        let lines = note
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+
+        guard lines.contains(where: { !$0.isEmpty }) else {
+            return "<p class=\"empty\">这一天还没有记录。</p>"
+        }
+
+        var fragments: [String] = []
+        var previousWasBlank = false
+        for line in lines {
+            guard !line.isEmpty else {
+                previousWasBlank = true
+                continue
+            }
+
+            if line == "---" {
+                fragments.append("<hr>")
+            } else if line.hasPrefix("## ") {
+                fragments.append("<h2>\(escape(String(line.dropFirst(3))))</h2>")
+            } else if line.hasPrefix("- ") {
+                fragments.append("<p class=\"bullet\">• \(escape(String(line.dropFirst(2))))</p>")
+            } else if isNumberedLine(line) {
+                fragments.append("<p class=\"numbered\">\(escape(line))</p>")
+            } else if line.hasPrefix("> ") {
+                fragments.append("<p class=\"quote\">\(escape(String(line.dropFirst(2))))</p>")
+            } else {
+                let topMargin = previousWasBlank ? " style=\"margin-top: 16px;\"" : ""
+                fragments.append("<p\(topMargin)>\(escape(line))</p>")
+            }
+            previousWasBlank = false
+        }
+        return fragments.joined(separator: "\n")
+    }
+
+    private static func isNumberedLine(_ line: String) -> Bool {
+        guard let dotIndex = line.firstIndex(of: ".") else { return false }
+        let prefix = line[..<dotIndex]
+        let rest = line[line.index(after: dotIndex)...]
+        return !prefix.isEmpty && prefix.allSatisfy(\.isNumber) && rest.hasPrefix(" ")
     }
 
     private static func escape(_ value: String) -> String {
@@ -2421,6 +2556,7 @@ struct QuickPanelHeader: View {
                     .background(hoveringRefresh ? QuickPanelStyle.cardStrong : Color.clear, in: Circle())
             }
             .buttonStyle(.plain)
+            .focusable(false)
             .onHover { hoveringRefresh = $0 }
             .help("刷新天气")
         }
@@ -2488,7 +2624,6 @@ struct QuickInspirationInputView: View {
                     Text("快速记录此刻的灵感…")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(QuickPanelStyle.weakText)
-                        .padding(.leading, 5)
                         .padding(.top, 8)
                 }
                 TextEditor(text: $text)
@@ -2585,6 +2720,7 @@ struct RecentInspirationListView: View {
                     .foregroundStyle(QuickPanelStyle.subText)
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
             }
 
             if items.isEmpty {
@@ -2672,6 +2808,7 @@ struct QuickActionTile: View {
             )
         }
         .buttonStyle(.plain)
+        .focusable(false)
         .scaleEffect(hovering ? 1.02 : 1)
         .animation(.spring(response: 0.20, dampingFraction: 0.82), value: hovering)
         .onHover { hovering = $0 }
@@ -2692,6 +2829,7 @@ struct QuickPrimaryButtonStyle: ButtonStyle {
                 in: RoundedRectangle(cornerRadius: 15, style: .continuous)
             )
             .shadow(color: QuickPanelStyle.purple.opacity(configuration.isPressed ? 0.12 : 0.24), radius: 16, x: 0, y: 8)
+            .focusable(false)
     }
 }
 
@@ -2704,6 +2842,7 @@ struct QuickSecondaryButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 15, style: .continuous)
                     .stroke(QuickPanelStyle.stroke, lineWidth: 1)
             )
+            .focusable(false)
     }
 }
 
@@ -2798,7 +2937,7 @@ struct ContentView: View {
             .environmentObject(store)
         }
         .sheet(isPresented: $showingIconSettings) {
-            IconSettingsSheet()
+            IconSettingsSheet(selectedThemeRaw: $selectedThemeRaw)
                 .environmentObject(iconManager)
                 .environmentObject(store)
                 .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
@@ -3029,6 +3168,7 @@ struct CalendarPanel: View {
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
                 .background(theme.palette.card.opacity(0.72), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
@@ -3048,6 +3188,7 @@ struct CalendarPanel: View {
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
                 .background(theme.palette.card.opacity(0.72), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
@@ -3159,6 +3300,7 @@ struct SidebarHistoryButton: View {
             .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
         }
         .buttonStyle(.plain)
+        .focusable(false)
         .scaleEffect(isHovering ? 1.012 : 1)
         .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isHovering)
         .onHover { isHovering = $0 }
@@ -3241,6 +3383,7 @@ struct ThemeSwitcher: View {
                 }
             }
             .buttonStyle(.plain)
+            .focusable(false)
 
             if isExpanded {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
@@ -3298,6 +3441,7 @@ struct ThemeSwatch: View {
             )
         }
         .buttonStyle(.plain)
+        .focusable(false)
         .hoverLift()
         .animation(.spring(response: 0.24, dampingFraction: 0.78), value: isSelected)
     }
@@ -3367,11 +3511,12 @@ struct InspirationSeedCard: View {
                             .animation(.easeInOut(duration: 1.8 + Double(index) * 0.16).repeatForever(autoreverses: true), value: animateGlow)
                     }
                 }
-                if let image = AppBackgroundLibrary.image(named: "InspirationPlantCapsule", fileExtension: "png") {
+                if let image = AppBackgroundLibrary.image(named: stage.imageName, fileExtension: "png") {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFit()
                         .frame(height: compact ? 126 : 152)
+                        .id(stage.imageName)
                         .shadow(
                             color: PerformanceTuning.prefersReducedEffects ? .clear : theme.palette.accent.opacity(shouldAnimateGlow && animateGlow ? 0.42 : 0.24),
                             radius: PerformanceTuning.prefersReducedEffects ? 0 : (shouldAnimateGlow && animateGlow ? 24 : 14),
@@ -3379,6 +3524,7 @@ struct InspirationSeedCard: View {
                             y: PerformanceTuning.prefersReducedEffects ? 0 : 10
                         )
                         .padding(.vertical, 8)
+                        .transition(.opacity.combined(with: .scale(scale: 0.985)))
                 } else {
                     VStack(spacing: 8) {
                         Image(systemName: stage.symbol)
@@ -3438,18 +3584,20 @@ struct InspirationSeedCard: View {
         }
     }
 
-    private var stage: (title: String, message: String, symbol: String, effect: String) {
+    private var stage: (title: String, message: String, symbol: String, effect: String, imageName: String) {
         switch noteCount {
         case 0:
-            return ("空胶囊", "写下一点灵感，小树苗就会醒来。", "capsule", "等一束光")
+            return ("空胶囊", "写下一点灵感，小树苗就会醒来。", "capsule", "等一束光", "CapsuleGrowthState01")
         case 1..<60:
-            return ("种子已落下", "灵感刚刚开始发光。", "circle.dotted", "灵感醒啦")
-        case 60..<160:
-            return ("小芽冒出", "今天的想法正在成形。", "leaf", "慢慢发芽")
-        case 160..<300:
-            return ("树苗生长", "记录已经有了清晰脉络。", "camera.macro", "继续生长")
+            return ("种子已落下", "灵感刚刚开始发光。", "circle.dotted", "灵感醒啦", "CapsuleGrowthState02")
+        case 60..<120:
+            return ("小芽冒出", "今天的想法正在成形。", "leaf", "慢慢发芽", "CapsuleGrowthState03")
+        case 120..<180:
+            return ("树苗舒展", "记录开始长出清晰方向。", "camera.macro", "正在舒展", "CapsuleGrowthState04")
+        case 180..<inspirationProgressTarget:
+            return ("枝叶生长", "今天的胶囊正在变饱满。", "tree", "继续生长", "CapsuleGrowthState05")
         default:
-            return ("灵感成林", "今天的胶囊很饱满。", "tree", "灵感满格")
+            return ("灵感成林", "今天的胶囊很饱满。", "tree.fill", "灵感满格", "CapsuleGrowthState06")
         }
     }
 
@@ -3998,6 +4146,7 @@ struct IconSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
     @EnvironmentObject private var reminderStore: ReminderStore
+    @Binding var selectedThemeRaw: String
     @AppStorage("cardOpacityPercent") private var cardOpacityPercent = 20.0
     @AppStorage("cardBlurPercent") private var cardBlurPercent = 45.0
     @AppStorage("performanceDiagnosticsEnabled") private var performanceDiagnosticsEnabled = true
@@ -4032,6 +4181,7 @@ struct IconSettingsSheet: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 16) {
                     PreferenceSection(title: "外观", symbol: "paintpalette") {
+                        ThemePreferenceCard(selectedThemeRaw: $selectedThemeRaw)
                         CustomIconCard(compact: false)
                         VisualTuningCard(opacityPercent: $cardOpacityPercent, blurPercent: $cardBlurPercent)
                     }
@@ -4076,6 +4226,108 @@ struct IconSettingsSheet: View {
                     .offset(x: 210, y: -170)
             }
         )
+    }
+}
+
+struct ThemePreferenceCard: View {
+    @Environment(\.appTheme) private var theme
+    @Binding var selectedThemeRaw: String
+
+    private var currentTheme: AppTheme {
+        AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [currentTheme.palette.accent.opacity(0.78), currentTheme.palette.accent2.opacity(0.70)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Image(systemName: currentTheme.symbol(.theme))
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                        .shadow(color: Color.black.opacity(0.22), radius: 6, x: 0, y: 3)
+                }
+                .frame(width: 42, height: 42)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text("主题换肤")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                        Text(currentTheme.title)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.palette.cyan)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(theme.palette.cyan.opacity(0.12), in: Capsule())
+                            .overlay(Capsule().stroke(theme.palette.cyan.opacity(0.22), lineWidth: 1))
+                    }
+                    Text(currentTheme.mood)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 10)
+
+                Button {
+                    let availableThemes = AppTheme.allCases.filter { $0 != currentTheme }
+                    selectedThemeRaw = (availableThemes.randomElement() ?? .immersiveVista).rawValue
+                } label: {
+                    Label("随机", systemImage: "shuffle")
+                        .font(.system(size: 12, weight: .bold))
+                        .noWrap(scale: 0.76)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .frame(width: 82)
+            }
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 9), count: 3), spacing: 9) {
+                ForEach(AppTheme.allCases) { appTheme in
+                    ThemeSwatch(appTheme: appTheme, isSelected: currentTheme == appTheme) {
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                            selectedThemeRaw = appTheme.rawValue
+                        }
+                    }
+                    .frame(height: 42)
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.palette.cardStrong.opacity(0.72))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                currentTheme.palette.accent.opacity(0.12),
+                                currentTheme.palette.accent2.opacity(0.07),
+                                Color.clear
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(currentTheme.palette.accent.opacity(0.52), lineWidth: 1.2)
+        )
+        .shadow(color: currentTheme.palette.accent.opacity(0.12), radius: 18, x: 0, y: 8)
     }
 }
 
@@ -4261,6 +4513,7 @@ struct NotificationStatusCard: View {
                 }
             }
             .buttonStyle(.plain)
+            .focusable(false)
 
             if isExpanded {
                 Text(feedback)
@@ -4386,6 +4639,7 @@ struct CalendarDayCell: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
                 .hoverLift()
             } else {
                 Color.clear
@@ -4537,6 +4791,7 @@ struct RestStartCard: View {
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .focusable(false)
         .hoverLift()
     }
 }
@@ -4741,7 +4996,7 @@ struct DailyOpeningOverlay: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.34)
+            Color.black.opacity(0.58)
                 .ignoresSafeArea()
                 .onTapGesture(perform: onClose)
 
@@ -4765,7 +5020,7 @@ struct DailyOpeningOverlay: View {
                         .noWrap(scale: 0.72)
                     Text(copy.message)
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(theme.palette.muted)
+                        .foregroundStyle(theme.palette.text.opacity(0.82))
                         .lineSpacing(5)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -4784,13 +5039,47 @@ struct DailyOpeningOverlay: View {
             }
             .padding(26)
             .frame(width: 460)
-            .glassPanel(radius: 26, active: true)
-            .overlay(
-                Image(systemName: theme.illustrationSymbol)
-                    .font(.system(size: 120, weight: .ultraLight))
-                    .foregroundStyle(theme.palette.accent.opacity(0.08))
-                    .offset(x: 150, y: 74)
+            .background(
+                ZStack {
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(theme.palette.ink.opacity(0.96))
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    theme.palette.surface.opacity(0.72),
+                                    theme.palette.plum.opacity(0.64),
+                                    theme.palette.ink.opacity(0.90)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Image(systemName: theme.illustrationSymbol)
+                        .font(.system(size: 120, weight: .ultraLight))
+                        .foregroundStyle(theme.palette.accent.opacity(0.055))
+                        .offset(x: 150, y: 74)
+                        .allowsHitTesting(false)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                theme.palette.accent.opacity(0.88),
+                                theme.palette.warm.opacity(0.48),
+                                theme.palette.accent2.opacity(0.70)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1.5
+                    )
+            )
+            .shadow(color: Color.black.opacity(0.48), radius: 34, x: 0, y: 18)
+            .shadow(color: theme.palette.accent.opacity(0.14), radius: 18)
         }
         .onAppear {
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
@@ -4990,6 +5279,142 @@ struct WeatherMiniPill: View {
     }
 }
 
+enum InspirationTextFormat: CaseIterable {
+    case heading
+    case bullet
+    case numbered
+    case quote
+    case divider
+
+    var title: String {
+        switch self {
+        case .heading: return "标题"
+        case .bullet: return "要点"
+        case .numbered: return "编号"
+        case .quote: return "引用"
+        case .divider: return "分隔"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .heading: return "textformat.size"
+        case .bullet: return "list.bullet"
+        case .numbered: return "list.number"
+        case .quote: return "quote.opening"
+        case .divider: return "minus"
+        }
+    }
+}
+
+struct InspirationFormatToolbar: View {
+    @Environment(\.appTheme) private var theme
+    let compact: Bool
+    let onSelect: (InspirationTextFormat) -> Void
+    let onExportWord: (() -> Void)?
+    let onExportPDF: (() -> Void)?
+    let exportDisabled: Bool
+
+    init(
+        compact: Bool,
+        exportDisabled: Bool = true,
+        onExportWord: (() -> Void)? = nil,
+        onExportPDF: (() -> Void)? = nil,
+        onSelect: @escaping (InspirationTextFormat) -> Void
+    ) {
+        self.compact = compact
+        self.exportDisabled = exportDisabled
+        self.onExportWord = onExportWord
+        self.onExportPDF = onExportPDF
+        self.onSelect = onSelect
+    }
+
+    var body: some View {
+        HStack(spacing: compact ? 6 : 8) {
+            ForEach(InspirationTextFormat.allCases, id: \.self) { format in
+                Button {
+                    onSelect(format)
+                } label: {
+                    Label(format.title, systemImage: format.symbol)
+                        .font(.system(size: compact ? 10 : 11, weight: .bold))
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .frame(minWidth: compact ? 48 : 58, minHeight: 30)
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .foregroundStyle(theme.palette.text.opacity(0.88))
+                .background(theme.palette.cardStrong.opacity(0.64), in: Capsule())
+                .overlay(Capsule().stroke(theme.palette.line.opacity(0.9), lineWidth: 1))
+                .hoverLift()
+            }
+            Spacer(minLength: 0)
+            if let onExportWord, let onExportPDF {
+                HStack(spacing: compact ? 6 : 8) {
+                    ToolbarExportButton(title: compact ? "Word" : "导出 Word", fileType: "W", compact: compact, disabled: exportDisabled, action: onExportWord)
+                    ToolbarExportButton(title: compact ? "PDF" : "导出 PDF", fileType: "P", compact: compact, disabled: exportDisabled, action: onExportPDF)
+                }
+                .fixedSize(horizontal: true, vertical: false)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(theme.palette.card.opacity(0.44), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .stroke(theme.palette.line.opacity(0.68), lineWidth: 1)
+        )
+    }
+}
+
+struct ToolbarExportButton: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let fileType: String
+    let compact: Bool
+    let disabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: compact ? 5 : 7) {
+                ZStack {
+                    Image(systemName: "doc")
+                        .font(.system(size: compact ? 13 : 14, weight: .semibold))
+                    Text(fileType)
+                        .font(.system(size: compact ? 6 : 7, weight: .black, design: .rounded))
+                        .offset(y: compact ? 1 : 1.5)
+                }
+                .frame(width: compact ? 16 : 18, height: compact ? 16 : 18)
+                Text(title)
+                    .font(.system(size: compact ? 10 : 11, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            .foregroundStyle(disabled ? theme.palette.muted.opacity(0.56) : theme.palette.text.opacity(0.94))
+            .frame(width: compact ? 68 : 94, height: compact ? 30 : 32)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .disabled(disabled)
+        .background(
+            LinearGradient(
+                colors: disabled
+                    ? [theme.palette.card.opacity(0.38), theme.palette.card.opacity(0.28)]
+                    : [theme.palette.accent.opacity(0.32), theme.palette.cyan.opacity(0.18)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: Capsule()
+        )
+        .overlay(Capsule().stroke(disabled ? theme.palette.line.opacity(0.46) : theme.palette.accent.opacity(0.62), lineWidth: 1))
+        .hoverLift()
+        .help(title)
+    }
+}
+
 struct TodayCapsuleHeroCard: View {
     @EnvironmentObject private var noteStore: NoteStore
     @EnvironmentObject private var reminderStore: ReminderStore
@@ -5041,34 +5466,48 @@ struct TodayCapsuleHeroCard: View {
                 .layoutPriority(2)
             }
 
-            ZStack(alignment: .topLeading) {
-                if draft.isEmpty {
-                    Text("写下今天闪过的一个想法……")
-                        .font(.system(size: compact ? 12 : 13, weight: .medium))
-                        .foregroundStyle(theme.palette.muted.opacity(0.62))
-                        .padding(.leading, 5)
-                        .padding(.top, 8)
+            VStack(spacing: 8) {
+                InspirationFormatToolbar(
+                    compact: compact,
+                    exportDisabled: exportedNoteText.isEmpty,
+                    onExportWord: exportWord,
+                    onExportPDF: exportPDF
+                ) { format in
+                    applyFormat(format)
                 }
-                TextEditor(text: $draft)
-                    .font(.system(size: compact ? 12 : 13))
-                    .foregroundStyle(theme.palette.text)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.clear)
-                    .frame(minHeight: compact ? 104 : 122)
-                    .onChange(of: draft) { updateDraft($0) }
-            }
-            .padding(6)
-            .background(theme.palette.ink.opacity(0.20), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(alignment: .bottomTrailing) {
+
+                ZStack(alignment: .topLeading) {
+                    if draft.isEmpty {
+                        Text("写下今天闪过的一个想法……")
+                            .font(.system(size: compact ? 12 : 13, weight: .medium))
+                            .foregroundStyle(theme.palette.muted.opacity(0.62))
+                            .padding(.top, 8)
+                    }
+                    TextEditor(text: $draft)
+                        .font(.system(size: compact ? 12 : 13))
+                        .foregroundStyle(theme.palette.text)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                        .frame(minHeight: compact ? 96 : 112)
+                        .onChange(of: draft) { updateDraft($0) }
+                }
+                .padding(.horizontal, 6)
+                .padding(.bottom, 2)
+
                 HStack(spacing: 8) {
+                    Spacer(minLength: 0)
                     Image(systemName: "leaf")
                     Text("\(draft.count) / \(inspirationCharacterLimit)")
                 }
                 .font(.system(size: 11, weight: .bold, design: .rounded))
                 .foregroundStyle(theme.palette.muted)
-                .padding(.trailing, 18)
-                .padding(.bottom, 14)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
+                .allowsHitTesting(false)
             }
+            .padding(.top, 8)
+            .padding(.horizontal, 8)
+            .background(theme.palette.ink.opacity(0.20), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .stroke(draft.isEmpty ? theme.palette.line : theme.palette.accent.opacity(0.42), lineWidth: 1)
@@ -5125,6 +5564,10 @@ struct TodayCapsuleHeroCard: View {
         min(Double(draft.count) / Double(inspirationProgressTarget), 1.0)
     }
 
+    private var exportedNoteText: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func updateDraft(_ value: String) {
         let limited = String(value.prefix(inspirationCharacterLimit))
         if limited != value {
@@ -5138,6 +5581,47 @@ struct TodayCapsuleHeroCard: View {
         }
         analysisWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    private func applyFormat(_ format: InspirationTextFormat) {
+        var insertion = ""
+        let needsLeadingBreak = !draft.isEmpty && !draft.hasSuffix("\n")
+
+        switch format {
+        case .heading:
+            insertion = "\(needsLeadingBreak ? "\n" : "")## "
+        case .bullet:
+            insertion = "\(needsLeadingBreak ? "\n" : "")- "
+        case .numbered:
+            insertion = "\(needsLeadingBreak ? "\n" : "")1. "
+        case .quote:
+            insertion = "\(needsLeadingBreak ? "\n" : "")> "
+        case .divider:
+            insertion = "\(needsLeadingBreak ? "\n" : "")---\n"
+        }
+
+        draft = String((draft + insertion).prefix(inspirationCharacterLimit))
+        noteStore.setNote(draft, for: selectedDate)
+        analysisWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            analysis = InspirationAnalyzer.analyze(draft)
+        }
+        analysisWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    private func exportWord() {
+        let text = exportedNoteText
+        guard !text.isEmpty else { return }
+        noteStore.flushSave()
+        NoteExporter.exportDocx(note: text, date: selectedDate)
+    }
+
+    private func exportPDF() {
+        let text = exportedNoteText
+        guard !text.isEmpty else { return }
+        noteStore.flushSave()
+        NoteExporter.exportPDF(note: text, date: selectedDate)
     }
 }
 
@@ -5789,8 +6273,7 @@ struct NotebookPanel: View {
                     Text("快来记录今日灵感吧，在这里，你可以畅所欲言。")
                         .font(.system(size: 15))
                         .foregroundStyle(theme.palette.muted.opacity(0.58))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 13)
+                        .padding(.top, 8)
                 }
                 TextEditor(text: $draft)
                     .font(.system(size: 15))
@@ -5847,6 +6330,28 @@ struct NotebookPanel: View {
         }
         noteStore.setNote(limited, for: selectedDate)
         scheduleAnalysis(for: limited)
+    }
+
+    private func applyFormat(_ format: InspirationTextFormat) {
+        var insertion = ""
+        let needsLeadingBreak = !draft.isEmpty && !draft.hasSuffix("\n")
+
+        switch format {
+        case .heading:
+            insertion = "\(needsLeadingBreak ? "\n" : "")## "
+        case .bullet:
+            insertion = "\(needsLeadingBreak ? "\n" : "")- "
+        case .numbered:
+            insertion = "\(needsLeadingBreak ? "\n" : "")1. "
+        case .quote:
+            insertion = "\(needsLeadingBreak ? "\n" : "")> "
+        case .divider:
+            insertion = "\(needsLeadingBreak ? "\n" : "")---\n"
+        }
+
+        draft = String((draft + insertion).prefix(inspirationCharacterLimit))
+        noteStore.setNote(draft, for: selectedDate)
+        scheduleAnalysis(for: draft)
     }
 
     private func scheduleAnalysis(for text: String) {
@@ -6187,6 +6692,11 @@ struct ReminderEditor: View {
                 }
                 .pickerStyle(.segmented)
 
+                Text(frequencyHelperText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 if frequency == .customMinutes || frequency == .customHours {
                     Stepper(value: $customInterval, in: 1...240) {
                         Text(frequency == .customMinutes ? "每隔 \(customInterval) 分钟提醒" : "每隔 \(customInterval) 小时提醒")
@@ -6199,27 +6709,30 @@ struct ReminderEditor: View {
             .padding(20)
             .glassPanel(radius: 20, active: frequency == .customMinutes || frequency == .customHours)
 
-            HStack(spacing: 18) {
+            HStack(alignment: .center, spacing: 18) {
                 Text("首次使用时，系统会询问通知权限。允许后才能准时弹出提醒。")
                     .font(.system(size: 12))
                     .foregroundStyle(theme.palette.muted)
                     .lineLimit(2)
                     .minimumScaleFactor(0.78)
                 Spacer()
-                Button("取消") { dismiss() }
-                    .buttonStyle(SecondaryButtonStyle())
-                    .frame(width: 108)
-                Button("保存") {
-                    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else {
-                        NSSound.beep()
-                        return
+                HStack(spacing: 12) {
+                    Button("取消") { dismiss() }
+                        .buttonStyle(SecondaryButtonStyle())
+                        .frame(width: 118, height: 48)
+                    Button("保存") {
+                        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else {
+                            NSSound.beep()
+                            return
+                        }
+                        onSave(ReminderItem(id: existingID ?? UUID(), title: trimmed, notes: notes.trimmingCharacters(in: .whitespacesAndNewlines), date: date, remindAt: remindAt, frequency: frequency, customInterval: customInterval, createdAt: createdAt))
+                        dismiss()
                     }
-                    onSave(ReminderItem(id: existingID ?? UUID(), title: trimmed, notes: notes.trimmingCharacters(in: .whitespacesAndNewlines), date: date, remindAt: remindAt, frequency: frequency, customInterval: customInterval, createdAt: createdAt))
-                    dismiss()
+                    .buttonStyle(PrimaryButtonStyle())
+                    .frame(width: 118, height: 48)
                 }
-                .buttonStyle(PrimaryButtonStyle())
-                .frame(width: 112)
+                .fixedSize(horizontal: true, vertical: true)
             }
             .padding(.top, 2)
         }
@@ -6235,6 +6748,23 @@ struct ReminderEditor: View {
                     .offset(x: 250, y: -220)
             }
         )
+    }
+
+    private var frequencyHelperText: String {
+        switch frequency {
+        case .daily:
+            return "会从起始日期起每日显示在日历与今日行动中，删除该事项即可取消后续重复提醒。"
+        case .weekdays:
+            return "会从起始日期起同步到每个工作日，周末不显示，删除该事项即可取消整组提醒。"
+        case .weekly:
+            return "会按所选日期的星期重复显示，删除该事项即可取消整组提醒。"
+        case .monthly:
+            return "会按所选日期的日期号每月重复显示，删除该事项即可取消整组提醒。"
+        case .customMinutes, .customHours:
+            return "会按固定间隔触发系统通知，首页仅在起始日期显示。"
+        case .once:
+            return "只在所选日期显示并提醒一次。"
+        }
     }
 }
 
@@ -6298,6 +6828,7 @@ struct PrimaryButtonStyle: ButtonStyle {
             .shadow(color: theme.palette.cyan.opacity(0.22), radius: 12, x: 0, y: 5)
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(.spring(response: 0.18, dampingFraction: 0.72), value: configuration.isPressed)
+            .focusable(false)
     }
 }
 
@@ -6316,6 +6847,7 @@ struct SecondaryButtonStyle: ButtonStyle {
             )
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(.spring(response: 0.18, dampingFraction: 0.72), value: configuration.isPressed)
+            .focusable(false)
     }
 }
 
@@ -6335,5 +6867,6 @@ struct IconButtonStyle: ButtonStyle {
             )
             .scaleEffect(configuration.isPressed ? 0.90 : 1)
             .animation(.spring(response: 0.16, dampingFraction: 0.72), value: configuration.isPressed)
+            .focusable(false)
     }
 }

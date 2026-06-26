@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT_ROOT="$ROOT/../../outputs"
 APP_NAME="灵栖胶囊Capsule"
 BUNDLE_ID="local.codex.lingqi-capsule"
-APP_VERSION="1.2.7"
-APP_BUILD="13"
+APP_VERSION="1.3.2"
+APP_BUILD="18"
 APP="$OUT_ROOT/$APP_NAME.app"
 DMG_ROOT="$ROOT/dmgroot"
 CONTENTS="$APP/Contents"
@@ -14,6 +14,8 @@ MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 DEFAULT_ICON="$ROOT/Assets/AppIcon.png"
 NOTIFICATION_ICON="$ROOT/Assets/NotificationIcon.png"
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
 rm -rf "$APP" "$OUT_ROOT/$APP_NAME.dmg" "$ROOT/icon.iconset" "$DMG_ROOT"
 mkdir -p "$MACOS" "$RESOURCES" "$ROOT/icon.iconset"
@@ -85,6 +87,11 @@ fi
 if [[ -f "$ROOT/Assets/InspirationPlantCapsule.png" ]]; then
   cp "$ROOT/Assets/InspirationPlantCapsule.png" "$RESOURCES/InspirationPlantCapsule.png"
 fi
+for CAPSULE_STATE in "$ROOT"/Assets/CapsuleGrowthState*.png; do
+  if [[ -f "$CAPSULE_STATE" ]]; then
+    cp "$CAPSULE_STATE" "$RESOURCES/"
+  fi
+done
 for BACKGROUND in "$ROOT"/Assets/ImmersiveVistaBackground*.jpg; do
   if [[ -f "$BACKGROUND" ]]; then
     cp "$BACKGROUND" "$RESOURCES/"
@@ -111,11 +118,53 @@ lipo -create \
 rm "$MACOS/DailyReminderWidget-x86_64" "$MACOS/DailyReminderWidget-arm64"
 
 chmod +x "$MACOS/DailyReminderWidget"
-codesign --force --deep --sign - "$APP" >/dev/null
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --timestamp \
+    --sign "$SIGN_IDENTITY" \
+    "$APP" >/dev/null
+else
+  codesign --force --deep --sign - "$APP" >/dev/null
+fi
 
 mkdir -p "$DMG_ROOT"
 cp -R "$APP" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/应用程序"
+cat > "$DMG_ROOT/首次打开修复.command" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_NAME="灵栖胶囊Capsule.app"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [[ -d "/Applications/$APP_NAME" ]]; then
+  TARGET="/Applications/$APP_NAME"
+elif [[ -d "$SCRIPT_DIR/$APP_NAME" ]]; then
+  TARGET="$SCRIPT_DIR/$APP_NAME"
+else
+  echo "未找到 $APP_NAME。请先将应用拖入“应用程序”文件夹，或把此脚本与 App 放在同一目录。"
+  read -r -p "按回车退出..."
+  exit 1
+fi
+
+echo "正在为本机移除下载隔离标记：$TARGET"
+xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+echo "完成。正在打开应用..."
+open "$TARGET"
+SCRIPT
+chmod +x "$DMG_ROOT/首次打开修复.command"
+cat > "$DMG_ROOT/首次打开说明.txt" <<'TEXT'
+如果在新 Mac 上看到“Apple 无法验证是否包含恶意软件”的提示：
+
+1. 先将“灵栖胶囊Capsule.app”拖到“应用程序”。
+2. 双击运行“首次打开修复.command”。
+3. 脚本只会移除本机下载隔离标记，然后打开应用。
+
+正式对外分发版本应使用 Apple Developer ID 签名并完成公证。
+TEXT
 
 hdiutil create \
   -volname "$APP_NAME" \
@@ -123,6 +172,13 @@ hdiutil create \
   -ov \
   -format UDZO \
   "$OUT_ROOT/$APP_NAME.dmg" >/dev/null
+
+if [[ -n "$NOTARY_PROFILE" ]]; then
+  xcrun notarytool submit "$OUT_ROOT/$APP_NAME.dmg" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait
+  xcrun stapler staple "$OUT_ROOT/$APP_NAME.dmg"
+fi
 
 echo "$APP"
 echo "$OUT_ROOT/$APP_NAME.dmg"

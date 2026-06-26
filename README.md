@@ -1,6 +1,6 @@
 # 灵栖胶囊Capsule
 
-灵栖胶囊Capsule 是一款本地 macOS 每日事项提醒小组件，支持日历事项、系统通知、今日灵感胶囊、主题换肤、天气提醒和自定义 Dock 图标。
+灵栖胶囊Capsule 是一款面向 macOS 与 iPhone 的每日灵感和行动记录工具。macOS 版本支持日历事项、系统通知、今日灵感胶囊、主题换肤、天气提醒和自定义 Dock 图标；iPhone 原生 SwiftUI 首版正在独立分支开发。
 
 ## 功能
 
@@ -36,7 +36,20 @@ work/DailyReminderWidget/
 │   └── DailyReminderWidget.swift
 ├── build.sh
 └── make_icon.swift
+
+work/LingqiCapsuleiOS/
+├── LingqiCapsuleiOS.xcodeproj/
+├── LingqiCapsuleiOS/
+│   ├── App/
+│   ├── Models/
+│   ├── Services/
+│   ├── Design/
+│   └── Features/
+└── Tools/
+    └── export_mac_migration.py
 ```
+
+iOS 产品与数据架构见 `docs/IOS_PRODUCT_ARCHITECTURE.md`。
 
 ## 本地构建
 
@@ -51,6 +64,12 @@ cd work/DailyReminderWidget
 
 - `灵栖胶囊Capsule.app`
 - `灵栖胶囊Capsule.dmg`
+
+如果需要把应用分发到另一台 Mac，建议使用 Apple Developer ID 签名和公证。详细流程见：
+
+```text
+docs/MAC_DISTRIBUTION.md
+```
 
 ## 图标规范
 
@@ -83,7 +102,7 @@ work/DailyReminderWidget/Assets/AppIcon.png
 
 ## 隐私说明
 
-事项、今日灵感胶囊、历史胶囊、主题设置和自定义图标数据保存在本机应用支持目录中，不会上传到服务器。天气功能会访问第三方天气服务以获取当前城市天气。更详细说明见 `PRIVACY.md`。
+macOS 当前版本将事项、灵感、主题和自定义图标保存在本机应用支持目录中。iPhone 版本使用用户 Apple ID 对应的私人 CloudKit 数据库实现跨设备同步，不建立额外账号，也不接入广告系统。天气功能会访问第三方天气服务以获取当前城市天气。更详细说明见 `PRIVACY.md`。
 
 ## 许可证
 
