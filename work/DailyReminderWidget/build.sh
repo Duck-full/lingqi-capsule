@@ -87,6 +87,11 @@ fi
 if [[ -f "$ROOT/Assets/InspirationPlantCapsule.png" ]]; then
   cp "$ROOT/Assets/InspirationPlantCapsule.png" "$RESOURCES/InspirationPlantCapsule.png"
 fi
+for CAPSULE_STATE in "$ROOT"/Assets/CapsuleGrowthState*.png; do
+  if [[ -f "$CAPSULE_STATE" ]]; then
+    cp "$CAPSULE_STATE" "$RESOURCES/"
+  fi
+done
 for BACKGROUND in "$ROOT"/Assets/ImmersiveVistaBackground*.jpg; do
   if [[ -f "$BACKGROUND" ]]; then
     cp "$BACKGROUND" "$RESOURCES/"
