@@ -84,6 +84,70 @@ extension Notification.Name {
     static let quickInspirationSaved = Notification.Name("local.codex.lingqi.quickInspirationSaved")
 }
 
+enum MainWindowPresenter {
+    private static let mainWindowIdentifier = NSUserInterfaceItemIdentifier("lingqi.mainWindow")
+    private static let appWindowTitle = "灵栖胶囊Capsule"
+    private static let restWindowTitle = "休鼾一下"
+
+    static func configureMainWindowIfNeeded(_ window: NSWindow) {
+        guard isMainWindowCandidate(window) else { return }
+        window.identifier = mainWindowIdentifier
+        window.title = appWindowTitle
+    }
+
+    static func present(route: QuickPanelRoute? = nil) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        if restoreExistingWindow(route: route) {
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            _ = restoreExistingWindow(route: route)
+        }
+    }
+
+    static func isMainWindowCandidate(_ window: NSWindow) -> Bool {
+        window.level == .normal
+            && window.title != restWindowTitle
+            && !(window is NSPanel)
+            && window.contentView != nil
+            && window.styleMask.contains(.titled)
+    }
+
+    @discardableResult
+    private static func restoreExistingWindow(route: QuickPanelRoute?) -> Bool {
+        guard let window = findMainWindow() else { return false }
+        configureMainWindowIfNeeded(window)
+
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        if !window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+        }
+        window.orderFrontRegardless()
+        window.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
+
+        if let route {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .quickPanelRouteRequested, object: route.rawValue)
+            }
+        }
+        return true
+    }
+
+    private static func findMainWindow() -> NSWindow? {
+        let windows = NSApplication.shared.windows
+        return windows.first(where: { $0.identifier == mainWindowIdentifier })
+            ?? windows.first(where: { $0.title == appWindowTitle && isMainWindowCandidate($0) })
+            ?? windows.first(where: isMainWindowCandidate)
+    }
+}
+
 final class WindowRenderState: ObservableObject {
     static let shared = WindowRenderState()
 
@@ -474,7 +538,7 @@ final class NoteStore: ObservableObject {
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let existing = self.note(for: date).trimmingCharacters(in: .whitespacesAndNewlines)
-        let merged = existing.isEmpty ? trimmed : existing + "\n" + trimmed
+        let merged = existing.isEmpty ? trimmed : existing + "\n\n" + trimmed
         setNote(merged, for: date)
     }
 
@@ -1377,8 +1441,7 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         await MainActor.run {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+            MainWindowPresenter.present(route: .today)
         }
     }
 }
@@ -1451,9 +1514,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MainWindowPresenter.present(route: .today)
+        return true
+    }
+
     private func configureWindows() {
-        for window in NSApplication.shared.windows where window.level == .normal {
-            window.title = "灵栖胶囊Capsule"
+        for window in NSApplication.shared.windows where MainWindowPresenter.isMainWindowCandidate(window) {
+            MainWindowPresenter.configureMainWindowIfNeeded(window)
             window.isMovableByWindowBackground = true
             window.minSize = defaultWindowSize
             window.isOpaque = true
@@ -2350,81 +2418,153 @@ struct ThemeBackgroundIllustration: View {
 }
 
 struct MenuBarQuickPanel: View {
-    @EnvironmentObject private var store: ReminderStore
+    var body: some View {
+        MenuBarQuickPanelView()
+    }
+}
+
+enum InspirationGrowthStage: String, Codable, CaseIterable {
+    case empty
+    case seed
+    case sprout
+    case seedling
+    case growing
+
+    static func stage(for count: Int) -> InspirationGrowthStage {
+        switch count {
+        case 0:
+            return .empty
+        case 1...30:
+            return .seed
+        case 31...100:
+            return .sprout
+        case 101...200:
+            return .seedling
+        default:
+            return .growing
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .empty:
+            return "sparkles"
+        case .seed:
+            return "circle.fill"
+        case .sprout:
+            return "leaf.fill"
+        case .seedling:
+            return "leaf.circle.fill"
+        case .growing:
+            return "tree.fill"
+        }
+    }
+}
+
+struct MenuBarQuickPanelView: View {
     @EnvironmentObject private var noteStore: NoteStore
     @EnvironmentObject private var weatherStore: WeatherStore
-    @Environment(\.appTheme) private var theme
+    @AppStorage("menubar.quickInputDraft") private var savedDraft = ""
     @State private var inspirationDraft = ""
-    @State private var inspirationAnalysis = InspirationAnalyzer.analyze("")
-    @State private var analysisWorkItem: DispatchWorkItem?
     @State private var isInputFocused = false
     @State private var saveFeedback: String?
     @State private var didSave = false
+    @State private var isSaving = false
+    @State private var logoPulse = false
 
     var body: some View {
         ZStack {
             QuickPanelBackground()
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 16) {
-                    QuickPanelHeader(onRefresh: refreshWeather)
-                    QuickWeatherBadge()
-                    QuickInspirationInputView(
-                        text: $inspirationDraft,
-                        analysis: inspirationAnalysis,
-                        isFocused: $isInputFocused,
-                        feedback: saveFeedback
-                    )
-                    QuickMainActionRow(
-                        canSave: canSave,
-                        didSave: didSave,
-                        onSave: saveInspiration,
-                        onOpen: { openMainWindow(route: .today) }
-                    )
-                    RecentInspirationListView(items: recentInspirations) {
-                        openMainWindow(route: .history)
-                    }
-                    QuickActionGridView { route in
-                        openMainWindow(route: route)
-                    }
-                    Text("愿你的灵感，慢慢发光 ✨")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(QuickPanelStyle.subText)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 10) {
+                HeaderStatusView(
+                    todayWordCount: todayWordCount,
+                    pulse: logoPulse,
+                    onRefresh: refreshWeather
+                )
+                QuickDateWeatherBar()
+                QuickInspirationInputView(
+                    text: $inspirationDraft,
+                    isFocused: $isInputFocused
+                )
+                InspirationStatusHintView(
+                    text: statusHintText,
+                    symbol: statusHintSymbol,
+                    feedback: saveFeedback
+                )
+                PrimaryActionArea(
+                    canSave: canSave,
+                    didSave: didSave,
+                    isSaving: isSaving,
+                    onSave: saveInspiration,
+                    onOpen: { openMainWindow(route: .today) }
+                )
+                QuickActionGridView { route in
+                    openMainWindow(route: route)
                 }
-                .padding(.horizontal, 22)
-                .padding(.vertical, 20)
+                RecentInspirationListView(
+                    items: recentInspirations,
+                    onViewAll: { openMainWindow(route: .history) },
+                    onOpenItem: { _ in openMainWindow(route: .history) }
+                )
+                FooterBrandSloganView()
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            if let saveFeedback {
+                EmotionalToast(message: saveFeedback)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 68)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .frame(width: 404, height: 648)
+        .frame(width: 392, height: 592)
         .onAppear {
-            inspirationDraft = ""
-            inspirationAnalysis = InspirationAnalyzer.analyze(inspirationDraft)
+            inspirationDraft = String(savedDraft.prefix(quickInspirationCharacterLimit))
             if weatherStore.info == nil {
                 weatherStore.refresh()
             }
         }
+        .onChange(of: inspirationDraft) { value in
+            updateDraft(value)
+        }
         .onDisappear {
+            savedDraft = inspirationDraft
             noteStore.flushSave()
+        }
+        .onExitCommand {
+            closePanel()
         }
     }
 
     private var recentInspirations: [RecentInspiration] {
-        noteStore.recentInspirations(limit: 3)
+        noteStore.recentInspirations(limit: 2)
     }
 
     private var canSave: Bool {
         !inspirationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var inspirationProgress: Double {
-        min(Double(inspirationDraft.count) / Double(quickInspirationCharacterLimit), 1.0)
+    private var todayWordCount: Int {
+        noteStore.note(for: Date()).trimmingCharacters(in: .whitespacesAndNewlines).count
+    }
+
+    private var statusHintText: String {
+        if let saveFeedback { return saveFeedback }
+        if canSave { return "灵感正在发光，记得保存" }
+        if todayWordCount >= 201 { return "今天的灵感正在慢慢发光" }
+        return "小树苗正在等第一颗灵感"
+    }
+
+    private var statusHintSymbol: String {
+        if saveFeedback != nil { return "leaf.fill" }
+        if canSave { return "sparkles" }
+        return "leaf"
     }
 
     private func openMainWindow(route: QuickPanelRoute = .today) {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
-        NotificationCenter.default.post(name: .quickPanelRouteRequested, object: route.rawValue)
+        MainWindowPresenter.present(route: route)
+        closePanel()
     }
 
     private func refreshWeather() {
@@ -2437,19 +2577,25 @@ struct MenuBarQuickPanel: View {
             inspirationDraft = limited
             return
         }
-        scheduleAnalysis(for: limited)
+        savedDraft = limited
     }
 
     private func saveInspiration() {
         let trimmed = inspirationDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        isSaving = true
         noteStore.appendNote(trimmed, for: Date())
+        noteStore.flushSave()
         inspirationDraft = ""
-        inspirationAnalysis = InspirationAnalyzer.analyze("")
-        didSave = true
-        saveFeedback = "灵感已被小树苗吸收"
-        NotificationCenter.default.post(name: .quickInspirationSaved, object: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+        savedDraft = ""
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+            didSave = true
+            isSaving = false
+            logoPulse.toggle()
+            saveFeedback = "灵感已被小树苗吸收"
+        }
+        NotificationCenter.default.post(name: .quickInspirationSaved, object: trimmed)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
             withAnimation(.easeOut(duration: 0.18)) {
                 didSave = false
                 saveFeedback = nil
@@ -2457,48 +2603,40 @@ struct MenuBarQuickPanel: View {
         }
     }
 
-    private func scheduleAnalysis(for text: String) {
-        analysisWorkItem?.cancel()
-        let work = DispatchWorkItem {
-            inspirationAnalysis = InspirationAnalyzer.analyze(text)
-        }
-        analysisWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    private func closePanel() {
+        NSApp.keyWindow?.close()
     }
-
 }
 
 enum QuickPanelStyle {
-    private static var theme: AppTheme {
-        let rawValue = UserDefaults.standard.string(forKey: "selectedTheme")
-        return AppTheme(rawValue: rawValue ?? "") ?? .immersiveVista
-    }
-
-    static var backgroundTop: Color { theme.palette.ink }
-    static var backgroundBottom: Color { theme.palette.plum }
-    static var card: Color { theme.palette.card }
-    static var cardStrong: Color { theme.palette.cardStrong }
-    static var stroke: Color { theme.palette.line }
-    static var strokeActive: Color { theme.palette.accent.opacity(0.58) }
-    static var text: Color { theme.palette.text }
-    static var subText: Color { theme.palette.muted }
-    static var weakText: Color { theme.palette.muted.opacity(0.62) }
-    static var blue: Color { theme.palette.accent }
-    static var green: Color { theme.palette.accent2 }
-    static var purple: Color { theme.palette.glowB }
+    static var backgroundTop: Color { Color(red: 0.04, green: 0.06, blue: 0.13) }
+    static var backgroundMiddle: Color { Color(red: 0.07, green: 0.09, blue: 0.18) }
+    static var backgroundBottom: Color { Color(red: 0.10, green: 0.09, blue: 0.22) }
+    static var card: Color { Color.white.opacity(0.075) }
+    static var cardStrong: Color { Color.white.opacity(0.105) }
+    static var stroke: Color { Color.white.opacity(0.15) }
+    static var strokeActive: Color { Color(red: 0.61, green: 0.52, blue: 1.0).opacity(0.78) }
+    static var text: Color { Color(red: 0.97, green: 0.98, blue: 0.99) }
+    static var subText: Color { Color(red: 0.67, green: 0.69, blue: 0.78) }
+    static var weakText: Color { Color(red: 0.45, green: 0.48, blue: 0.60) }
+    static var blue: Color { Color(red: 0.38, green: 0.65, blue: 0.98) }
+    static var green: Color { Color(red: 0.65, green: 0.95, blue: 0.82) }
+    static var purple: Color { Color(red: 0.66, green: 0.55, blue: 0.98) }
 }
 
 struct QuickPanelBackground: View {
-    @Environment(\.appTheme) private var theme
-
     var body: some View {
         ZStack {
-            LinearGradient(colors: [QuickPanelStyle.backgroundTop, QuickPanelStyle.backgroundBottom], startPoint: .topLeading, endPoint: .bottomTrailing)
-            RadialGradient(colors: [theme.palette.accent.opacity(0.20), .clear], center: .topTrailing, startRadius: 10, endRadius: 320)
-            RadialGradient(colors: [theme.palette.warm.opacity(0.11), .clear], center: .bottomLeading, startRadius: 10, endRadius: 360)
+            LinearGradient(
+                colors: [QuickPanelStyle.backgroundTop, QuickPanelStyle.backgroundMiddle, QuickPanelStyle.backgroundBottom],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            RadialGradient(colors: [QuickPanelStyle.blue.opacity(0.20), .clear], center: .topLeading, startRadius: 8, endRadius: 300)
+            RadialGradient(colors: [QuickPanelStyle.purple.opacity(0.24), .clear], center: .bottomTrailing, startRadius: 20, endRadius: 360)
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .opacity(0.18)
+                .opacity(0.16)
         }
     }
 }
@@ -2516,7 +2654,7 @@ struct QuickGlassCard<Content: View>: View {
 
     var body: some View {
         content
-            .background(QuickPanelStyle.card.opacity(active ? 1.18 : 1), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background(QuickPanelStyle.card.opacity(active ? 1.32 : 1), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .stroke(active ? QuickPanelStyle.strokeActive : QuickPanelStyle.stroke, lineWidth: active ? 1.2 : 1)
@@ -2525,34 +2663,60 @@ struct QuickGlassCard<Content: View>: View {
     }
 }
 
-struct QuickPanelHeader: View {
-    @Environment(\.appTheme) private var theme
+struct HeaderStatusView: View {
+    let todayWordCount: Int
+    let pulse: Bool
     let onRefresh: () -> Void
     @State private var hoveringRefresh = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: theme.symbol(.theme))
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(QuickPanelStyle.green)
-                .frame(width: 32, height: 32)
-                .background(QuickPanelStyle.cardStrong, in: Circle())
-                .overlay(Circle().stroke(QuickPanelStyle.stroke, lineWidth: 1))
-            Text("灵栖胶囊")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(QuickPanelStyle.text)
+        HStack(spacing: 9) {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [QuickPanelStyle.blue.opacity(0.38), QuickPanelStyle.purple.opacity(0.18), QuickPanelStyle.cardStrong],
+                            center: .topLeading,
+                            startRadius: 4,
+                            endRadius: 34
+                        )
+                    )
+                    .overlay(Circle().stroke(QuickPanelStyle.strokeActive.opacity(0.72), lineWidth: 1))
+                    .shadow(color: QuickPanelStyle.purple.opacity(pulse ? 0.48 : 0.24), radius: pulse ? 15 : 9, x: 0, y: 0)
+                Image(systemName: growthStage.symbol)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(QuickPanelStyle.green)
+                    .scaleEffect(pulse ? 1.08 : 1.0)
+            }
+            .frame(width: 42, height: 42)
+            .animation(.spring(response: 0.32, dampingFraction: 0.68), value: pulse)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("灵栖胶囊")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(QuickPanelStyle.text)
+                    .lineLimit(1)
+                Text("愿灵感慢慢发光")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(QuickPanelStyle.subText)
+                    .lineLimit(1)
+            }
+            .layoutPriority(1)
             Spacer()
             Circle()
-                .fill(QuickPanelStyle.green)
+                .fill(QuickPanelStyle.blue)
                 .frame(width: 7, height: 7)
-            Text("已保存本地")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(QuickPanelStyle.green.opacity(0.88))
+            Text("本地保存")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(QuickPanelStyle.blue)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .help("所有灵感默认保存在本机，不上传云端")
             Button(action: onRefresh) {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(hoveringRefresh ? QuickPanelStyle.text : QuickPanelStyle.subText)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 26, height: 26)
                     .background(hoveringRefresh ? QuickPanelStyle.cardStrong : Color.clear, in: Circle())
             }
             .buttonStyle(.plain)
@@ -2560,43 +2724,45 @@ struct QuickPanelHeader: View {
             .onHover { hoveringRefresh = $0 }
             .help("刷新天气")
         }
-        .frame(height: 40)
+        .frame(height: 42)
+    }
+
+    private var growthStage: InspirationGrowthStage {
+        InspirationGrowthStage.stage(for: todayWordCount)
     }
 }
 
-struct QuickWeatherBadge: View {
+struct QuickDateWeatherBar: View {
     @EnvironmentObject private var weatherStore: WeatherStore
 
     var body: some View {
-        QuickGlassCard(radius: 16) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(dateText)
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(QuickPanelStyle.text)
-                    Text(weatherText)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(QuickPanelStyle.subText)
-                        .lineLimit(1)
-                }
+        QuickGlassCard(radius: 15) {
+            HStack(spacing: 8) {
+                Label(dateText, systemImage: "calendar")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(QuickPanelStyle.text.opacity(0.88))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+                    .layoutPriority(1)
                 Spacer()
                 Image(systemName: weatherStore.info?.icon ?? "cloud.sun.fill")
-                    .font(.system(size: 19, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(QuickPanelStyle.blue)
-                Text(shortWeatherText)
+                Text(weatherText)
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(QuickPanelStyle.text)
+                    .foregroundStyle(QuickPanelStyle.text.opacity(0.86))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.78)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 12)
+            .frame(height: 44)
         }
     }
 
     private var dateText: String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_Hans_CN")
-        formatter.dateFormat = "M月d日 EEEE"
+        formatter.dateFormat = "M月d日 E"
         return formatter.string(from: Date())
     }
 
@@ -2604,108 +2770,129 @@ struct QuickWeatherBadge: View {
         guard let info = weatherStore.info else { return weatherStore.message }
         return "\(info.city) \(Int(info.temperature.rounded()))°C \(info.summary)"
     }
-
-    private var shortWeatherText: String {
-        guard let info = weatherStore.info else { return "天气" }
-        return "\(Int(info.temperature.rounded()))°C \(info.summary)"
-    }
 }
 
 struct QuickInspirationInputView: View {
     @Binding var text: String
-    let analysis: InspirationAnalysis
     @Binding var isFocused: Bool
-    let feedback: String?
+    @FocusState private var editorFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .topLeading) {
-                if text.isEmpty {
-                    Text("快速记录此刻的灵感…")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(QuickPanelStyle.weakText)
-                        .padding(.top, 8)
-                }
-                TextEditor(text: $text)
-                    .font(.system(size: 14))
-                    .foregroundStyle(QuickPanelStyle.text)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.clear)
-                    .frame(height: 110)
-                    .onChange(of: text) { value in
-                        let limited = String(value.prefix(quickInspirationCharacterLimit))
-                        if limited != value { text = limited }
-                    }
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text("写下刚刚闪过的一个想法…")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(QuickPanelStyle.weakText)
+                    .padding(.top, 16)
+                    .padding(.leading, 16)
             }
-            .padding(8)
-            .background(QuickPanelStyle.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(alignment: .bottomTrailing) {
-                Text("\(text.count) / \(quickInspirationCharacterLimit)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(text.count >= quickInspirationCharacterLimit ? Color(red: 0.99, green: 0.65, blue: 0.65) : QuickPanelStyle.subText)
-                    .padding(.trailing, 14)
-                    .padding(.bottom, 12)
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(text.isEmpty ? QuickPanelStyle.stroke : QuickPanelStyle.strokeActive, lineWidth: text.isEmpty ? 1 : 1.2)
-            )
-
-            HStack(spacing: 7) {
-                if let feedback {
-                    Label(feedback, systemImage: "leaf.fill")
-                        .foregroundStyle(QuickPanelStyle.green)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                } else {
-                    Label(analysis.mood, systemImage: analysis.moodSymbol)
-                        .foregroundStyle(QuickPanelStyle.subText)
+            TextEditor(text: $text)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(QuickPanelStyle.text)
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 28)
+                .focused($editorFocused)
+                .onChange(of: text) { value in
+                    let limited = String(value.prefix(quickInspirationCharacterLimit))
+                    if limited != value { text = limited }
                 }
+            HStack {
+                Text("⌘ + Enter 保存 · Esc 关闭")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(QuickPanelStyle.weakText)
                 Spacer()
+                Text("\(text.count) / \(quickInspirationCharacterLimit)")
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(text.count >= quickInspirationCharacterLimit - 20 ? QuickPanelStyle.green : QuickPanelStyle.subText)
             }
-            .font(.system(size: 11, weight: .semibold))
-            .frame(height: 18)
-            .animation(.easeInOut(duration: 0.18), value: feedback)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+        }
+        .frame(height: 120)
+        .background(QuickPanelStyle.cardStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(editorFocused || !text.isEmpty ? QuickPanelStyle.strokeActive : QuickPanelStyle.stroke, lineWidth: editorFocused || !text.isEmpty ? 1.25 : 1)
+        )
+        .shadow(color: (editorFocused ? QuickPanelStyle.purple : Color.black).opacity(editorFocused ? 0.30 : 0.14), radius: editorFocused ? 20 : 10, x: 0, y: 8)
+        .onChange(of: editorFocused) { value in
+            isFocused = value
         }
     }
 }
 
-struct QuickMainActionRow: View {
+struct InspirationStatusHintView: View {
+    let text: String
+    let symbol: String
+    let feedback: String?
+
+    var body: some View {
+        Label(text, systemImage: symbol)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(feedback == nil ? QuickPanelStyle.subText : QuickPanelStyle.green)
+            .frame(height: 14)
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.18), value: text)
+    }
+}
+
+struct PrimaryActionArea: View {
     let canSave: Bool
     let didSave: Bool
+    let isSaving: Bool
     let onSave: () -> Void
     let onOpen: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Button(action: onSave) {
                 HStack(spacing: 8) {
-                    Image(systemName: didSave ? "checkmark.circle.fill" : "tray.and.arrow.down.fill")
-                    Text(didSave ? "已保存" : "保存灵感  ⌘↵")
+                    Image(systemName: didSave ? "checkmark.circle.fill" : "sparkles")
+                    Text(buttonTitle)
                 }
                 .font(.system(size: 13, weight: .bold))
-                .frame(maxWidth: .infinity, minHeight: 46)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .frame(maxWidth: .infinity, minHeight: 40)
             }
             .buttonStyle(QuickPrimaryButtonStyle())
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!canSave)
+            .disabled(!canSave || isSaving)
             .opacity(canSave ? 1 : 0.46)
 
             Button(action: onOpen) {
-                Text("打开完整胶囊")
-                    .font(.system(size: 13, weight: .bold))
-                    .frame(maxWidth: .infinity, minHeight: 46)
+                HStack(spacing: 8) {
+                    Text("打开完整胶囊")
+                    Image(systemName: "arrow.right")
+                }
+                .font(.system(size: 12, weight: .bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .frame(maxWidth: .infinity, minHeight: 40)
             }
             .buttonStyle(QuickSecondaryButtonStyle())
+            .keyboardShortcut("o", modifiers: .command)
         }
+    }
+
+    private var buttonTitle: String {
+        if didSave { return "已保存" }
+        if isSaving { return "保存中…" }
+        return canSave ? "保存灵感  ⌘↵" : "输入后保存"
     }
 }
 
 struct RecentInspirationListView: View {
     let items: [RecentInspiration]
     let onViewAll: () -> Void
+    let onOpenItem: (RecentInspiration) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Text("最近灵感")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -2725,37 +2912,73 @@ struct RecentInspirationListView: View {
 
             if items.isEmpty {
                 QuickGlassCard(radius: 14) {
-                    Text("还没有灵感记录，先写下第一条吧。")
-                        .font(.system(size: 12, weight: .medium))
+                    Text("还没有灵感记录，先把第一颗种子放进胶囊吧")
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(QuickPanelStyle.subText)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(13)
+                        .padding(12)
                 }
             } else {
-                VStack(spacing: 8) {
-                    ForEach(items.prefix(3)) { item in
-                        QuickGlassCard(radius: 14) {
-                            HStack(alignment: .top, spacing: 10) {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(item.displayText)
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(QuickPanelStyle.text)
-                                        .lineLimit(2)
-                                    Text(item.timeText)
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(QuickPanelStyle.weakText)
-                                }
-                                Spacer()
-                                Text(item.countText)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(QuickPanelStyle.weakText)
-                            }
-                            .padding(12)
-                        }
+                VStack(spacing: 7) {
+                    ForEach(items.prefix(2)) { item in
+                        RecentInspirationCard(item: item, onOpen: { onOpenItem(item) })
                     }
                 }
             }
         }
+    }
+}
+
+struct RecentInspirationCard: View {
+    let item: RecentInspiration
+    let onOpen: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onOpen) {
+            QuickGlassCard(active: hovering, radius: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .top, spacing: 9) {
+                        Circle()
+                            .fill(LinearGradient(colors: [QuickPanelStyle.blue, QuickPanelStyle.purple], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .frame(width: 8, height: 8)
+                            .padding(.top, 6)
+                        Text(item.displayText)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(QuickPanelStyle.text.opacity(0.90))
+                            .lineLimit(2)
+                        Spacer(minLength: 8)
+                        if hovering {
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(item.text, forType: .string)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(QuickPanelStyle.subText)
+                                    .frame(width: 24, height: 24)
+                                    .background(QuickPanelStyle.cardStrong, in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .focusable(false)
+                        }
+                    }
+                    HStack {
+                        Text(item.timeText)
+                        Spacer()
+                        Text(item.countText)
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(QuickPanelStyle.weakText)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 8)
+                .frame(height: 66)
+            }
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -2764,7 +2987,7 @@ struct QuickActionGridView: View {
     let action: (QuickPanelRoute) -> Void
 
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 4), spacing: 7) {
             ForEach(items, id: \.0.rawValue) { item in
                 QuickActionTile(title: item.1, systemImage: item.2) {
                     action(item.0)
@@ -2777,8 +3000,8 @@ struct QuickActionGridView: View {
         [
             (.summary, "今日总结", theme.symbol(.note)),
             (.history, "历史胶囊", "archivebox"),
-            (.theme, "主题换肤", theme.symbol(.theme)),
-            (.settings, "设置中心", "gearshape")
+            (.theme, "主题", "paintpalette"),
+            (.settings, "设置", "gearshape")
         ]
     }
 }
@@ -2791,19 +3014,19 @@ struct QuickActionTile: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 Image(systemName: systemImage)
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(QuickPanelStyle.blue.opacity(hovering ? 1 : 0.78))
                 Text(title)
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(QuickPanelStyle.subText)
                     .noWrap(scale: 0.72)
             }
-            .frame(maxWidth: .infinity, minHeight: 76)
-            .background(QuickPanelStyle.card.opacity(hovering ? 1.35 : 1), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(QuickPanelStyle.card.opacity(hovering ? 1.35 : 1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(hovering ? QuickPanelStyle.strokeActive : QuickPanelStyle.stroke, lineWidth: 1)
             )
         }
@@ -2821,7 +3044,7 @@ struct QuickPrimaryButtonStyle: ButtonStyle {
             .foregroundStyle(Color.white)
             .background(
                 LinearGradient(
-                    colors: [Color(red: 0.49, green: 0.55, blue: 1.0), Color(red: 0.75, green: 0.52, blue: 0.99)],
+                    colors: [QuickPanelStyle.blue, QuickPanelStyle.purple, Color(red: 0.75, green: 0.52, blue: 0.99)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -2843,6 +3066,16 @@ struct QuickSecondaryButtonStyle: ButtonStyle {
                     .stroke(QuickPanelStyle.stroke, lineWidth: 1)
             )
             .focusable(false)
+    }
+}
+
+struct FooterBrandSloganView: View {
+    var body: some View {
+        Text("愿你的灵感，慢慢发光 ✨")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(QuickPanelStyle.subText.opacity(0.82))
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, -4)
     }
 }
 
@@ -4909,12 +5142,7 @@ final class RestWindowManager {
     }
 
     private func restoreMainWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        if let mainWindow = NSApplication.shared.windows.first(where: { $0.title == "灵栖胶囊Capsule" }) {
-            mainWindow.makeKeyAndOrderFront(nil)
-            return
-        }
-        NSApplication.shared.windows.first(where: { $0.title != "休鼾一下" })?.makeKeyAndOrderFront(nil)
+        MainWindowPresenter.present(route: .today)
     }
 }
 
