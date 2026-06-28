@@ -95,18 +95,20 @@ enum MainWindowPresenter {
         window.title = appWindowTitle
     }
 
-    static func present(route: QuickPanelRoute? = nil) {
+    @discardableResult
+    static func present(route: QuickPanelRoute? = nil) -> Bool {
         NSApp.setActivationPolicy(.regular)
         NSApp.unhide(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         if restoreExistingWindow(route: route) {
-            return
+            return true
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             _ = restoreExistingWindow(route: route)
         }
+        return false
     }
 
     static func isMainWindowCandidate(_ window: NSWindow) -> Bool {
@@ -145,6 +147,11 @@ enum MainWindowPresenter {
         return windows.first(where: { $0.identifier == mainWindowIdentifier })
             ?? windows.first(where: { $0.title == appWindowTitle && isMainWindowCandidate($0) })
             ?? windows.first(where: isMainWindowCandidate)
+    }
+
+    static func shouldCloseAsMenuPanel(_ window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        return !isMainWindowCandidate(window)
     }
 }
 
@@ -1461,7 +1468,7 @@ struct DailyReminderWidgetApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("灵栖胶囊Capsule", id: "main") {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(noteStore)
@@ -2464,6 +2471,7 @@ enum InspirationGrowthStage: String, Codable, CaseIterable {
 struct MenuBarQuickPanelView: View {
     @EnvironmentObject private var noteStore: NoteStore
     @EnvironmentObject private var weatherStore: WeatherStore
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("menubar.quickInputDraft") private var savedDraft = ""
     @State private var inspirationDraft = ""
     @State private var isInputFocused = false
@@ -2563,8 +2571,14 @@ struct MenuBarQuickPanelView: View {
     }
 
     private func openMainWindow(route: QuickPanelRoute = .today) {
-        MainWindowPresenter.present(route: route)
-        closePanel()
+        let panelWindow = NSApp.keyWindow
+        if !MainWindowPresenter.present(route: route) {
+            openWindow(id: "main")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                MainWindowPresenter.present(route: route)
+            }
+        }
+        closePanel(panelWindow)
     }
 
     private func refreshWeather() {
@@ -2603,8 +2617,9 @@ struct MenuBarQuickPanelView: View {
         }
     }
 
-    private func closePanel() {
-        NSApp.keyWindow?.close()
+    private func closePanel(_ panelWindow: NSWindow? = NSApp.keyWindow) {
+        guard MainWindowPresenter.shouldCloseAsMenuPanel(panelWindow) else { return }
+        panelWindow?.close()
     }
 }
 
