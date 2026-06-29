@@ -14,6 +14,7 @@ MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 DEFAULT_ICON="$ROOT/Assets/AppIcon.png"
 NOTIFICATION_ICON="$ROOT/Assets/NotificationIcon.png"
+MENU_BAR_ICON="$ROOT/Assets/MenuBarIconTemplate.png"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
@@ -80,6 +81,9 @@ fi
 iconutil -c icns "$ROOT/icon.iconset" -o "$RESOURCES/AppIcon.icns"
 if [[ -f "$NOTIFICATION_ICON" ]]; then
   cp "$NOTIFICATION_ICON" "$RESOURCES/NotificationIcon.png"
+fi
+if [[ -f "$MENU_BAR_ICON" ]]; then
+  cp "$MENU_BAR_ICON" "$RESOURCES/MenuBarIconTemplate.png"
 fi
 if [[ -f "$DEFAULT_ICON" ]]; then
   cp "$DEFAULT_ICON" "$RESOURCES/AppIcon.png"
