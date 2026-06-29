@@ -155,6 +155,17 @@ enum MainWindowPresenter {
     }
 }
 
+enum MenuBarIconProvider {
+    static func image() -> NSImage {
+        let image = Bundle.main.image(forResource: "MenuBarIconTemplate")
+            ?? NSImage(systemSymbolName: "leaf.fill", accessibilityDescription: "灵栖胶囊")
+            ?? NSImage(size: NSSize(width: 18, height: 18))
+        image.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
+        return image
+    }
+}
+
 final class WindowRenderState: ObservableObject {
     static let shared = WindowRenderState()
 
@@ -1482,15 +1493,15 @@ struct DailyReminderWidgetApp: App {
             CommandGroup(replacing: .newItem) { }
         }
 
-        MenuBarExtra(
-            "灵栖胶囊Capsule",
-            systemImage: (AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista).symbol(.theme)
-        ) {
+        MenuBarExtra {
             MenuBarQuickPanel()
                 .environmentObject(store)
                 .environmentObject(noteStore)
                 .environmentObject(weatherStore)
                 .environment(\.appTheme, AppTheme(rawValue: selectedThemeRaw) ?? .immersiveVista)
+        } label: {
+            Image(nsImage: MenuBarIconProvider.image())
+                .accessibilityLabel("灵栖胶囊Capsule")
         }
         .menuBarExtraStyle(.window)
     }
