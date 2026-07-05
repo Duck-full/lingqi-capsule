@@ -773,6 +773,37 @@ enum NoteExporter {
         }
     }
 
+    static func exportKnowledgeDocx(bundle: KnowledgeExportBundle) {
+        guard let destination = saveURL(extensionName: "docx", suggestedName: bundle.filenameStem) else { return }
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("knowledge-bundle-\(UUID().uuidString).html")
+        let html = htmlDocument(title: bundle.title, note: bundle.readableText)
+        do {
+            try html.write(to: temp, atomically: true, encoding: .utf8)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/textutil")
+            process.arguments = ["-convert", "docx", "-output", destination.path, temp.path]
+            try process.run()
+            process.waitUntilExit()
+            try? FileManager.default.removeItem(at: temp)
+            if process.terminationStatus != 0 {
+                NSSound.beep()
+            }
+        } catch {
+            NSSound.beep()
+        }
+    }
+
+    static func exportKnowledgePDF(bundle: KnowledgeExportBundle) {
+        guard let destination = saveURL(extensionName: "pdf", suggestedName: bundle.filenameStem) else { return }
+        let view = NotePDFView(dateTitle: bundle.title, note: readableNote(bundle.readableText))
+        let data = view.dataWithPDF(inside: view.bounds)
+        do {
+            try data.write(to: destination, options: [.atomic])
+        } catch {
+            NSSound.beep()
+        }
+    }
+
     private static func saveURL(extensionName: String, date: Date) -> URL? {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
@@ -783,8 +814,27 @@ enum NoteExporter {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    private static func saveURL(extensionName: String, suggestedName: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "\(suggestedName).\(extensionName)"
+        if let type = UTType(filenameExtension: extensionName) {
+            panel.allowedContentTypes = [type]
+        }
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
     private static func htmlDocument(note: String, date: Date) -> String {
         let body = htmlNoteBody(note)
+        return htmlDocument(title: "今日灵感胶囊", subtitle: DateKey.display(from: date), body: body)
+    }
+
+    private static func htmlDocument(title: String, note: String) -> String {
+        htmlDocument(title: title, subtitle: "", body: htmlNoteBody(note))
+    }
+
+    private static func htmlDocument(title: String, subtitle: String, body: String) -> String {
+        let subtitleBlock = subtitle.isEmpty ? "" : "<div class=\"date\">\(escape(subtitle))</div>"
         return """
         <!doctype html>
         <html>
@@ -805,8 +855,8 @@ enum NoteExporter {
           </style>
         </head>
         <body>
-          <h1>今日灵感胶囊</h1>
-          <div class="date">\(escape(DateKey.display(from: date)))</div>
+          <h1>\(escape(title))</h1>
+          \(subtitleBlock)
           <div class="note">\(body)</div>
         </body>
         </html>
@@ -3116,6 +3166,7 @@ struct ContentView: View {
     @State private var showingIconSettings = false
     @State private var showingThemePanel = false
     @State private var showingHistory = false
+    @State private var showingKnowledgeBase = false
     @State private var showingDailyGreeting = false
     @State private var greeting = EmotionalCopy.greetings.randomElement() ?? EmotionalCopy.greetings[0]
     @AppStorage("lastDailyGreetingDate") private var lastDailyGreetingDate = ""
@@ -3131,7 +3182,7 @@ struct ContentView: View {
             ZStack {
                 AnimatedGlowBackground(theme: theme)
                 HStack(spacing: 0) {
-                    Sidebar(selectedDate: $selectedDate, showingEditor: $showingEditor, showingHistory: $showingHistory, selectedThemeRaw: $selectedThemeRaw, compact: compact) {
+                    Sidebar(selectedDate: $selectedDate, showingEditor: $showingEditor, showingHistory: $showingHistory, showingKnowledgeBase: $showingKnowledgeBase, selectedThemeRaw: $selectedThemeRaw, compact: compact) {
                         RestWindowManager.shared.show(theme: theme) {
                             RestWindowManager.shared.close()
                         }
@@ -3143,6 +3194,8 @@ struct ContentView: View {
                     Group {
                         if showingHistory {
                             HistoryCapsulesView(selectedDate: $selectedDate, showingHistory: $showingHistory, compact: compact)
+                        } else if showingKnowledgeBase {
+                            KnowledgeBaseView(selectedDate: $selectedDate, showingKnowledgeBase: $showingKnowledgeBase, compact: compact)
                         } else {
                             DayDetail(selectedDate: $selectedDate, showingEditor: $showingEditor, editingItem: $editingItem, compact: compact)
                         }
@@ -3222,15 +3275,20 @@ struct ContentView: View {
         switch route {
         case .today:
             showingHistory = false
+            showingKnowledgeBase = false
         case .summary:
             showingHistory = false
+            showingKnowledgeBase = false
         case .history:
             showingHistory = true
+            showingKnowledgeBase = false
         case .theme:
             showingHistory = false
+            showingKnowledgeBase = false
             showingThemePanel = true
         case .settings:
             showingHistory = false
+            showingKnowledgeBase = false
             showingIconSettings = true
         }
     }
@@ -3263,52 +3321,66 @@ struct Sidebar: View {
     @Binding var selectedDate: Date
     @Binding var showingEditor: Bool
     @Binding var showingHistory: Bool
+    @Binding var showingKnowledgeBase: Bool
     @Binding var selectedThemeRaw: String
     let compact: Bool
     let onStartRestMode: () -> Void
     @State private var visibleMonth = Date()
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: compact ? 14 : 18) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("灵栖胶囊Capsule")
-                        .font(.system(size: compact ? 26 : 30, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.palette.text)
-                        .noWrap(scale: 0.75)
-                    Text(todaySummary)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(theme.palette.muted)
-                        .noWrap(scale: 0.72)
-                }
-                .padding(.top, compact ? 14 : 22)
-
-                CalendarPanel(selectedDate: $selectedDate, visibleMonth: $visibleMonth)
-
-                SidebarQuickActionRow(
-                    compact: compact,
-                    onRest: onStartRestMode,
-                    onToday: {
-                        selectedDate = Date()
-                        showingHistory = false
-                    },
-                    onNewItem: {
-                        showingHistory = false
-                        showingEditor = true
-                    }
-                )
-
-                SidebarHistoryButton(
-                    isActive: showingHistory,
-                    compact: compact,
-                    action: { showingHistory = true }
-                )
-
-                InspirationSeedCard(noteCount: noteStore.note(for: Date()).count, compact: compact)
+        VStack(alignment: .leading, spacing: compact ? 9 : 11) {
+            VStack(alignment: .leading, spacing: compact ? 5 : 6) {
+                Text("灵栖胶囊Capsule")
+                    .font(.system(size: compact ? 22 : 25, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                    .noWrap(scale: 0.70)
+                Text(todaySummary)
+                    .font(.system(size: compact ? 11 : 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .noWrap(scale: 0.68)
             }
-            .padding(.horizontal, compact ? 14 : 24)
-            .padding(.bottom, 18)
+            .padding(.top, compact ? 10 : 14)
+
+            CalendarPanel(selectedDate: $selectedDate, visibleMonth: $visibleMonth, compact: compact)
+
+            SidebarQuickActionRow(
+                compact: compact,
+                onRest: onStartRestMode,
+                onToday: {
+                    selectedDate = Date()
+                    showingHistory = false
+                    showingKnowledgeBase = false
+                },
+                onNewItem: {
+                    showingHistory = false
+                    showingKnowledgeBase = false
+                    showingEditor = true
+                }
+            )
+
+            SidebarKnowledgeButton(
+                isActive: showingKnowledgeBase,
+                compact: compact,
+                action: {
+                    showingHistory = false
+                    showingKnowledgeBase = true
+                }
+            )
+
+            SidebarHistoryButton(
+                isActive: showingHistory,
+                compact: compact,
+                action: {
+                    showingKnowledgeBase = false
+                    showingHistory = true
+                }
+            )
+
+            InspirationSeedCard(noteCount: noteStore.note(for: Date()).count, compact: compact)
         }
+        .padding(.horizontal, compact ? 12 : 18)
+        .padding(.bottom, compact ? 10 : 14)
+        .frame(maxHeight: .infinity, alignment: .top)
         .background(theme.palette.ink.opacity(0.18))
     }
 
@@ -3326,23 +3398,26 @@ struct SidebarQuickActionRow: View {
     let onNewItem: () -> Void
 
     var body: some View {
-        HStack(spacing: compact ? 7 : 9) {
+        HStack(spacing: compact ? 6 : 7) {
             SidebarQuickActionButton(
                 title: compact ? "休鼾" : "休鼾一下",
                 systemImage: "moon.zzz.fill",
                 accent: theme.palette.warm,
+                compact: compact,
                 action: onRest
             )
             SidebarQuickActionButton(
                 title: "今天",
                 systemImage: "calendar",
                 accent: theme.palette.cyan,
+                compact: compact,
                 action: onToday
             )
             SidebarQuickActionButton(
                 title: "新事项",
                 systemImage: "plus",
                 accent: theme.palette.accent,
+                compact: compact,
                 isPrimary: true,
                 action: onNewItem
             )
@@ -3356,28 +3431,29 @@ struct SidebarQuickActionButton: View {
     let title: String
     let systemImage: String
     let accent: Color
+    let compact: Bool
     var isPrimary = false
     let action: () -> Void
     @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: compact ? 4 : 5) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: compact ? 10 : 11, weight: .bold))
                 Text(title)
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .noWrap(scale: 0.62)
+                    .font(.system(size: compact ? 10.5 : 11.5, weight: .bold, design: .rounded))
+                    .noWrap(scale: 0.58)
             }
             .foregroundStyle(isPrimary ? .white : theme.palette.text)
-            .frame(maxWidth: .infinity, minHeight: 42)
-            .padding(.horizontal, 8)
-            .background(buttonBackground, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .frame(maxWidth: .infinity, minHeight: compact ? 34 : 37)
+            .padding(.horizontal, compact ? 5 : 6)
+            .background(buttonBackground, in: RoundedRectangle(cornerRadius: compact ? 13 : 14, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                RoundedRectangle(cornerRadius: compact ? 13 : 14, style: .continuous)
                     .stroke(isPrimary ? Color.white.opacity(0.22) : accent.opacity(isHovering ? 0.74 : 0.36), lineWidth: isHovering ? 1.35 : 1)
             )
-            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: compact ? 13 : 14, style: .continuous))
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovering ? 1.025 : 1)
@@ -3412,19 +3488,19 @@ struct CalendarPanel: View {
     @Environment(\.appTheme) private var theme
     @Binding var selectedDate: Date
     @Binding var visibleMonth: Date
+    let compact: Bool
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
     private let weekdaySymbols = ["日", "一", "二", "三", "四", "五", "六"]
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: compact ? 5 : 6) {
             HStack {
                 Button {
                     moveMonth(-1)
                 } label: {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 30, height: 30)
+                        .font(.system(size: compact ? 10 : 11, weight: .bold))
+                        .frame(width: compact ? 26 : 28, height: compact ? 26 : 28)
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -3435,7 +3511,7 @@ struct CalendarPanel: View {
                 )
                 Spacer()
                 Text(monthTitle)
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: compact ? 12.5 : 13.5, weight: .bold, design: .rounded))
                     .foregroundStyle(theme.palette.text)
                     .noWrap(scale: 0.8)
                 Spacer()
@@ -3443,8 +3519,8 @@ struct CalendarPanel: View {
                     moveMonth(1)
                 } label: {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 30, height: 30)
+                        .font(.system(size: compact ? 10 : 11, weight: .bold))
+                        .frame(width: compact ? 26 : 28, height: compact ? 26 : 28)
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -3455,12 +3531,12 @@ struct CalendarPanel: View {
                 )
             }
 
-            LazyVGrid(columns: columns, spacing: 4) {
+            LazyVGrid(columns: columns, spacing: compact ? 2 : 3) {
                 ForEach(weekdaySymbols, id: \.self) { symbol in
                     Text(symbol)
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: compact ? 8.5 : 9.5, weight: .bold))
                         .foregroundStyle(theme.palette.muted)
-                        .frame(height: 14)
+                        .frame(height: compact ? 11 : 12)
                 }
                 ForEach(days, id: \.self) { day in
                     CalendarDayCell(
@@ -3468,20 +3544,25 @@ struct CalendarPanel: View {
                         selectedDate: $selectedDate,
                         visibleMonth: visibleMonth,
                         count: store.count(on: day),
-                        hasNote: noteStore.hasNote(on: day)
+                        hasNote: noteStore.hasNote(on: day),
+                        compact: compact
                     )
                 }
             }
-            HStack(spacing: 12) {
+            HStack(spacing: compact ? 8 : 10) {
                 CalendarLegendDot(color: theme.palette.cyan, text: "事项")
                 CalendarLegendDot(color: theme.palette.warm, text: "灵感")
                 Spacer(minLength: 0)
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 10)
-        .glassPanel(radius: 22)
+        .padding(.horizontal, compact ? 9 : 10)
+        .padding(.vertical, compact ? 8 : 9)
+        .glassPanel(radius: compact ? 20 : 21)
         .hoverLift()
+    }
+
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: compact ? 2 : 3), count: 7)
     }
 
     private var monthTitle: String {
@@ -3534,29 +3615,72 @@ struct SidebarHistoryButton: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: isActive ? "archivebox.fill" : "archivebox")
-                    .font(.system(size: compact ? 14 : 16, weight: .bold))
+                    .font(.system(size: compact ? 12 : 14, weight: .bold))
                     .foregroundStyle(theme.palette.cyan)
-                    .frame(width: 34, height: 34)
-                    .background(theme.palette.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                VStack(alignment: .leading, spacing: 3) {
+                    .frame(width: compact ? 28 : 31, height: compact ? 28 : 31)
+                    .background(theme.palette.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: compact ? 9 : 10, style: .continuous))
+                VStack(alignment: .leading, spacing: compact ? 2 : 3) {
                     Text("历史胶囊")
-                        .font(.system(size: compact ? 13 : 14, weight: .bold, design: .rounded))
+                        .font(.system(size: compact ? 12 : 13, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.palette.text)
                         .noWrap()
                     Text("回看每日灵感、事项与总结")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: compact ? 9.5 : 10.5, weight: .medium))
                         .foregroundStyle(theme.palette.muted)
-                        .noWrap(scale: 0.68)
+                        .noWrap(scale: 0.62)
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: compact ? 9.5 : 10.5, weight: .bold))
                     .foregroundStyle(theme.palette.muted)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .glassPanel(radius: 17, active: isActive || isHovering)
-            .contentShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+            .padding(.horizontal, compact ? 11 : 13)
+            .padding(.vertical, compact ? 8 : 10)
+            .glassPanel(radius: compact ? 15 : 16, active: isActive || isHovering)
+            .contentShape(RoundedRectangle(cornerRadius: compact ? 15 : 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .scaleEffect(isHovering ? 1.012 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isHovering)
+        .onHover { isHovering = $0 }
+    }
+}
+
+struct SidebarKnowledgeButton: View {
+    @Environment(\.appTheme) private var theme
+    let isActive: Bool
+    let compact: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: isActive ? "brain.head.profile.fill" : "brain.head.profile")
+                    .font(.system(size: compact ? 12 : 14, weight: .bold))
+                    .foregroundStyle(theme.palette.accent)
+                    .frame(width: compact ? 28 : 31, height: compact ? 28 : 31)
+                    .background(theme.palette.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: compact ? 9 : 10, style: .continuous))
+                VStack(alignment: .leading, spacing: compact ? 2 : 3) {
+                    Text("个人知识库")
+                        .font(.system(size: compact ? 12 : 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                        .noWrap()
+                    Text("沉淀灵感、搜索知识与画像")
+                        .font(.system(size: compact ? 9.5 : 10.5, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                        .noWrap(scale: 0.62)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: compact ? 9.5 : 10.5, weight: .bold))
+                    .foregroundStyle(theme.palette.muted)
+            }
+            .padding(.horizontal, compact ? 11 : 13)
+            .padding(.vertical, compact ? 8 : 10)
+            .glassPanel(radius: compact ? 15 : 16, active: isActive || isHovering)
+            .contentShape(RoundedRectangle(cornerRadius: compact ? 15 : 16, style: .continuous))
         }
         .buttonStyle(.plain)
         .focusable(false)
@@ -3732,6 +3856,1818 @@ struct MoodNote: View {
     }
 }
 
+private struct KnowledgeEntryOverride: Codable {
+    let categoryRawValue: String
+    let keywords: [String]
+}
+
+private struct KnowledgeMonthFilter: Identifiable, Equatable {
+    let id: String
+    let date: Date
+    let title: String
+}
+
+private enum KnowledgeQuickTimeRange: String, CaseIterable, Identifiable {
+    case all
+    case sevenDays
+    case thirtyDays
+    case thisMonth
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "全部时间"
+        case .sevenDays: return "近 7 天"
+        case .thirtyDays: return "近 30 天"
+        case .thisMonth: return "本月"
+        }
+    }
+
+    func range(referenceDate: Date = Date(), calendar: Calendar = .current) -> KnowledgeTimeRange? {
+        switch self {
+        case .all:
+            return nil
+        case .sevenDays:
+            return KnowledgeTimeRange(start: calendar.date(byAdding: .day, value: -6, to: referenceDate), end: referenceDate)
+        case .thirtyDays:
+            return KnowledgeTimeRange(start: calendar.date(byAdding: .day, value: -29, to: referenceDate), end: referenceDate)
+        case .thisMonth:
+            let start = calendar.date(from: calendar.dateComponents([.year, .month], from: referenceDate))
+            return KnowledgeTimeRange(start: start, end: referenceDate)
+        }
+    }
+}
+
+private enum KnowledgeCognitiveState: String {
+    case idle
+    case active
+    case growing
+    case saturated
+
+    var title: String {
+        switch self {
+        case .idle: return "等待沉淀"
+        case .active: return "正在沉淀"
+        case .growing: return "持续成长"
+        case .saturated: return "高能饱满"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .idle: return "写下第一条灵感，知识胶囊会被点亮。"
+        case .active: return "今天已经开始形成可复用的知识痕迹。"
+        case .growing: return "近期沉淀正在加速，认知结构更清晰。"
+        case .saturated: return "今日知识能量很满，适合回看与归纳。"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .idle: return "moon.stars"
+        case .active: return "sparkles"
+        case .growing: return "leaf"
+        case .saturated: return "bolt.fill"
+        }
+    }
+}
+
+struct KnowledgeBaseView: View {
+    @EnvironmentObject private var noteStore: NoteStore
+    @EnvironmentObject private var reminderStore: ReminderStore
+    @EnvironmentObject private var weatherStore: WeatherStore
+    @Environment(\.appTheme) private var theme
+    @Binding var selectedDate: Date
+    @Binding var showingKnowledgeBase: Bool
+    let compact: Bool
+    @State private var query = ""
+    @State private var selectedCategory: KnowledgeCategory?
+    @State private var selectedMonth: KnowledgeMonthFilter?
+    @State private var selectedMood: String?
+    @State private var selectedTimeRange: KnowledgeQuickTimeRange = .all
+    @State private var selectedTrendGranularity: KnowledgeTrendGranularity = .month
+    @State private var knowledgeEntries: [KnowledgeEntry] = []
+    @State private var profileSnapshot = KnowledgeBaseService.profile(from: [])
+    @State private var trendPoints: [KnowledgeTrendPoint] = []
+    @State private var categoryShares: [KnowledgeCategoryShare] = []
+    @State private var keywordNetwork = KnowledgeKeywordNetwork(nodes: [], edges: [])
+    @State private var detailEntry: KnowledgeEntry?
+    @State private var entryOverrides: [String: KnowledgeEntryOverride] = [:]
+    @State private var hasLoadedKnowledgePage = false
+
+    private var entries: [KnowledgeEntry] {
+        knowledgeEntries
+    }
+
+    private var activeFilter: KnowledgeSearchFilter {
+        KnowledgeSearchFilter(
+            query: query,
+            category: selectedCategory,
+            month: selectedMonth?.date,
+            timeRange: selectedTimeRange.range(),
+            mood: selectedMood
+        )
+    }
+
+    private var filteredEntries: [KnowledgeEntry] {
+        KnowledgeBaseService.search(entries, filter: activeFilter)
+    }
+
+    private var profile: KnowledgeProfile {
+        profileSnapshot
+    }
+
+    private var todayEntries: [KnowledgeEntry] {
+        entries.filter { Calendar.current.isDateInToday($0.date) }
+    }
+
+    private var yesterdayEntries: [KnowledgeEntry] {
+        entries.filter { Calendar.current.isDateInYesterday($0.date) }
+    }
+
+    private var todayKnowledgeWords: Int {
+        todayEntries.reduce(0) { $0 + $1.wordCount }
+    }
+
+    private var yesterdayKnowledgeWords: Int {
+        yesterdayEntries.reduce(0) { $0 + $1.wordCount }
+    }
+
+    private var knowledgeGrowthRate: Int {
+        guard yesterdayKnowledgeWords > 0 else { return todayKnowledgeWords > 0 ? 100 : 0 }
+        return Int(((Double(todayKnowledgeWords - yesterdayKnowledgeWords) / Double(yesterdayKnowledgeWords)) * 100).rounded())
+    }
+
+    private var cognitiveState: KnowledgeCognitiveState {
+        if todayKnowledgeWords >= 1200 { return .saturated }
+        if todayKnowledgeWords >= 300 || knowledgeGrowthRate >= 50 { return .growing }
+        if todayKnowledgeWords > 0 { return .active }
+        return .idle
+    }
+
+    private var coreKeywords: [String] {
+        let todayKeywords = todayEntries.flatMap(\.keywords)
+        let scopedKeywords = todayKeywords.isEmpty ? profile.topKeywords : todayKeywords
+        var result: [String] = []
+        for keyword in scopedKeywords where !result.contains(keyword) {
+            result.append(keyword)
+            if result.count == 5 { break }
+        }
+        return result
+    }
+
+    private var availableMonths: [KnowledgeMonthFilter] {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "yyyy年M月"
+        var seen = Set<String>()
+        return entries.compactMap { entry in
+            let monthStart = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: entry.date)) ?? entry.date
+            let key = DateKey.string(from: monthStart)
+            guard !seen.contains(key) else { return nil }
+            seen.insert(key)
+            return KnowledgeMonthFilter(id: key, date: monthStart, title: formatter.string(from: monthStart))
+        }
+    }
+
+    private var availableMoods: [String] {
+        Array(Set(entries.map { $0.mood.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
+            .sorted()
+    }
+
+    private var hasActiveFilters: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || selectedCategory != nil
+            || selectedMonth != nil
+            || selectedMood != nil
+            || selectedTimeRange != .all
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: compact ? 14 : 18) {
+                header
+                if let detailEntry {
+                    KnowledgeDetailPanel(entry: detailEntry, compact: compact) {
+                        self.detailEntry = nil
+                    } saveEdits: { category, keywords in
+                        saveEntryEdits(entry: detailEntry, category: category, keywords: keywords)
+                    } openSource: {
+                        selectedDate = detailEntry.date
+                        showingKnowledgeBase = false
+                    }
+                } else {
+                    cognitiveHomePanel
+                    searchPanel
+                    if filteredEntries.isEmpty {
+                        emptyState
+                    } else {
+                        KnowledgeFeedSection(
+                            entries: filteredEntries,
+                            compact: compact,
+                            reuseEntry: copyKnowledgeText,
+                            editEntry: { detailEntry = $0 },
+                            viewEntry: openKnowledgeSource
+                        )
+                    }
+                }
+            }
+            .padding(.horizontal, compact ? 20 : 32)
+            .padding(.bottom, 26)
+        }
+        .onAppear {
+            loadOverrides()
+            reloadKnowledge()
+            hasLoadedKnowledgePage = false
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.88).delay(0.04)) {
+                hasLoadedKnowledgePage = true
+            }
+        }
+        .onReceive(noteStore.objectWillChange) { _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: reloadKnowledge)
+        }
+        .onReceive(reminderStore.objectWillChange) { _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: reloadKnowledge)
+        }
+        .onChange(of: query) { _ in refreshKnowledgeDerivedState() }
+        .onChange(of: selectedCategory) { _ in refreshKnowledgeDerivedState() }
+        .onChange(of: selectedMonth) { _ in refreshKnowledgeDerivedState() }
+        .onChange(of: selectedMood) { _ in refreshKnowledgeDerivedState() }
+        .onChange(of: selectedTimeRange) { _ in refreshKnowledgeDerivedState() }
+        .onChange(of: selectedTrendGranularity) { _ in refreshKnowledgeDerivedState() }
+    }
+
+    private func reloadKnowledge() {
+        let sources = DailyCapsuleService.historyCapsules(noteStore: noteStore, reminderStore: reminderStore, weatherInfo: weatherStore.info)
+            .map { capsule in
+                KnowledgeSourceEntry(
+                    id: UUID(uuidString: capsule.id.uuidSeed) ?? UUID(),
+                    date: capsule.date,
+                    text: capsule.noteText,
+                    keywords: capsule.keywords,
+                    summary: capsule.summary,
+                    mood: capsule.mood
+                )
+            }
+        let newEntries = KnowledgeBaseService.entries(from: sources).map(applyOverride)
+        knowledgeEntries = newEntries
+        refreshKnowledgeDerivedState(allEntries: newEntries)
+        if let detailEntry, let refreshed = newEntries.first(where: { $0.id == detailEntry.id }) {
+            self.detailEntry = refreshed
+        }
+    }
+
+    private func refreshKnowledgeDerivedState() {
+        refreshKnowledgeDerivedState(allEntries: knowledgeEntries)
+    }
+
+    private func refreshKnowledgeDerivedState(allEntries: [KnowledgeEntry]) {
+        let visibleEntries = KnowledgeBaseService.search(allEntries, filter: activeFilter)
+        profileSnapshot = KnowledgeBaseService.profile(from: visibleEntries)
+        trendPoints = KnowledgeBaseService.trend(from: allEntries, filter: activeFilter, granularity: selectedTrendGranularity)
+        categoryShares = KnowledgeBaseService.categoryShares(from: allEntries, filter: activeFilter)
+        keywordNetwork = KnowledgeBaseService.keywordNetwork(from: allEntries, filter: activeFilter)
+    }
+
+    private func applyOverride(to entry: KnowledgeEntry) -> KnowledgeEntry {
+        guard let override = entryOverrides[entry.id.uuidString],
+              let category = KnowledgeCategory(rawValue: override.categoryRawValue) else {
+            return entry
+        }
+        return KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: override.keywords)
+    }
+
+    private func saveEntryEdits(entry: KnowledgeEntry, category: KnowledgeCategory, keywords: [String]) {
+        let edited = KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: keywords)
+        entryOverrides[entry.id.uuidString] = KnowledgeEntryOverride(categoryRawValue: edited.category.rawValue, keywords: edited.keywords)
+        persistOverrides()
+        knowledgeEntries = knowledgeEntries.map { $0.id == edited.id ? edited : $0 }
+        refreshKnowledgeDerivedState()
+        detailEntry = edited
+    }
+
+    private func loadOverrides() {
+        guard let data = UserDefaults.standard.data(forKey: "knowledge.entry.overrides.v1"),
+              let decoded = try? JSONDecoder().decode([String: KnowledgeEntryOverride].self, from: data) else {
+            entryOverrides = [:]
+            return
+        }
+        entryOverrides = decoded
+    }
+
+    private func persistOverrides() {
+        guard let data = try? JSONEncoder().encode(entryOverrides) else { return }
+        UserDefaults.standard.set(data, forKey: "knowledge.entry.overrides.v1")
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("个人知识库")
+                    .font(.system(size: compact ? 28 : 34, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                    .noWrap()
+                Text("从历史灵感中沉淀可搜索、可复用的知识条目。")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .noWrap(scale: 0.72)
+            }
+            Spacer()
+            Button {
+                showingKnowledgeBase = false
+                selectedDate = Date()
+            } label: {
+                Label("回到今天", systemImage: "calendar")
+                    .font(.system(size: 12, weight: .bold))
+                    .noWrap()
+            }
+            .buttonStyle(SecondaryButtonStyle())
+        }
+        .padding(.top, compact ? 16 : 24)
+    }
+
+    private var cognitiveHomePanel: some View {
+        VStack(alignment: .leading, spacing: compact ? 18 : 24) {
+            KnowledgeCoreCard(
+                state: cognitiveState,
+                todayWords: todayKnowledgeWords,
+                growthRate: knowledgeGrowthRate,
+                keywords: coreKeywords,
+                compact: compact,
+                continueAction: continueKnowledgeCapture
+            )
+            .opacity(hasLoadedKnowledgePage ? 1 : 0)
+            .offset(y: hasLoadedKnowledgePage ? 0 : 16)
+
+            KnowledgeInsightSection(
+                trendPoints: trendPoints,
+                selectedGranularity: $selectedTrendGranularity,
+                categoryShares: categoryShares,
+                keywordNodes: keywordNetwork.nodes,
+                compact: compact,
+                selectKeyword: { query = $0 }
+            )
+            .opacity(hasLoadedKnowledgePage ? 1 : 0)
+            .offset(y: hasLoadedKnowledgePage ? 0 : 18)
+            .animation(.spring(response: 0.42, dampingFraction: 0.9).delay(0.12), value: hasLoadedKnowledgePage)
+        }
+    }
+
+    private var profilePanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: compact ? 10 : 12) {
+                KnowledgeMetricCard(title: "知识条目", value: "\(profile.totalEntries)", detail: "来自历史灵感", symbol: "books.vertical")
+                KnowledgeMetricCard(title: "沉淀字数", value: "\(profile.totalWords)", detail: "可继续搜索复用", symbol: "text.quote")
+                KnowledgeMetricCard(title: "主要画像", value: profile.dominantCategory.title, detail: "当前知识倾向", symbol: profile.dominantCategory.symbol)
+            }
+            HStack(alignment: .top, spacing: compact ? 10 : 12) {
+                KnowledgeTrendCard(points: trendPoints, selectedGranularity: $selectedTrendGranularity, compact: compact)
+                KnowledgeCategoryShareCard(shares: categoryShares, compact: compact)
+            }
+            KnowledgeKeywordNetworkCard(network: keywordNetwork, compact: compact) { keyword in
+                query = keyword
+            }
+            if !profile.topKeywords.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("知识画像关键词", systemImage: "person.crop.circle.badge.checkmark")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    FlowPillRow(items: profile.topKeywords, fallback: [])
+                }
+                .padding(14)
+                .glassPanel(radius: 18)
+            }
+        }
+    }
+
+    private var searchPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(theme.palette.muted)
+                TextField("搜索关键词、分类、摘要或正文", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(theme.palette.text)
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 42)
+            .background(theme.palette.card.opacity(0.72), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(theme.palette.line, lineWidth: 1))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    KnowledgeCategoryChip(title: "全部", isSelected: selectedCategory == nil) {
+                        selectedCategory = nil
+                    }
+                    ForEach(KnowledgeCategory.allCases.filter { $0 != .uncategorized }) { category in
+                        let count = profile.categoryCounts[category, default: 0]
+                        KnowledgeCategoryChip(title: "\(category.title) \(count)", isSelected: selectedCategory == category) {
+                            selectedCategory = category
+                        }
+                    }
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    KnowledgeCategoryChip(title: "全部月份", isSelected: selectedMonth == nil) {
+                        selectedMonth = nil
+                    }
+                    ForEach(availableMonths) { month in
+                        KnowledgeCategoryChip(title: month.title, isSelected: selectedMonth == month) {
+                            selectedMonth = month
+                        }
+                    }
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(KnowledgeQuickTimeRange.allCases) { range in
+                        KnowledgeCategoryChip(title: range.title, isSelected: selectedTimeRange == range) {
+                            selectedTimeRange = range
+                        }
+                    }
+                }
+            }
+
+            if !availableMoods.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        KnowledgeCategoryChip(title: "全部心情", isSelected: selectedMood == nil) {
+                            selectedMood = nil
+                        }
+                        ForEach(availableMoods, id: \.self) { mood in
+                            KnowledgeCategoryChip(title: mood, isSelected: selectedMood == mood) {
+                                selectedMood = mood
+                            }
+                        }
+                    }
+                }
+            }
+
+            if hasActiveFilters {
+                Button {
+                    clearFilters()
+                } label: {
+                    Label("清空筛选", systemImage: "xmark.circle")
+                        .font(.system(size: 12, weight: .bold))
+                        .noWrap(scale: 0.72)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+        }
+        .padding(compact ? 16 : 18)
+        .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(theme.palette.line.opacity(0.56), lineWidth: 1.15))
+        .shadow(color: Color.black.opacity(0.16), radius: 18, x: 0, y: 12)
+    }
+
+    private var exportPanel: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("批量导出")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                Text(exportScopeText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                exportBatchWord()
+            } label: {
+                Label("导出 Word", systemImage: "doc.richtext")
+                    .font(.system(size: 12, weight: .bold))
+                    .noWrap(scale: 0.72)
+            }
+            .buttonStyle(SecondaryButtonStyle())
+            .disabled(filteredEntries.isEmpty)
+            Button {
+                exportBatchPDF()
+            } label: {
+                Label("导出 PDF", systemImage: "doc.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .noWrap(scale: 0.72)
+            }
+            .buttonStyle(SecondaryButtonStyle())
+            .disabled(filteredEntries.isEmpty)
+        }
+        .padding(compact ? 14 : 16)
+        .glassPanel(radius: 20)
+    }
+
+    private var exportScopeText: String {
+        var parts = [selectedCategory?.title ?? "全部分类", selectedMonth?.title ?? "全部月份"]
+        if selectedTimeRange != .all { parts.append(selectedTimeRange.title) }
+        if let selectedMood { parts.append("心情 \(selectedMood)") }
+        parts.append("\(filteredEntries.count) 条知识")
+        return parts.joined(separator: " · ")
+    }
+
+    private func exportBatchWord() {
+        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: activeFilter, includeProfile: true)
+        NoteExporter.exportKnowledgeDocx(bundle: bundle)
+    }
+
+    private func exportBatchPDF() {
+        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: activeFilter, includeProfile: true)
+        NoteExporter.exportKnowledgePDF(bundle: bundle)
+    }
+
+    private func continueKnowledgeCapture() {
+        selectedDate = Date()
+        showingKnowledgeBase = false
+    }
+
+    private func openKnowledgeSource(_ entry: KnowledgeEntry) {
+        selectedDate = entry.date
+        showingKnowledgeBase = false
+    }
+
+    private func copyKnowledgeText(_ entry: KnowledgeEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(entry.sourceText.isEmpty ? entry.summary : entry.sourceText, forType: .string)
+    }
+
+    private func clearFilters() {
+        query = ""
+        selectedCategory = nil
+        selectedMonth = nil
+        selectedMood = nil
+        selectedTimeRange = .all
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "books.vertical")
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(theme.palette.accent)
+            Text(entries.isEmpty ? "还没有可沉淀的知识" : "没有匹配的知识条目")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.palette.text)
+            Text(entries.isEmpty ? "继续记录今日胶囊，知识库会自动从历史灵感中归纳。" : "换一个关键词或清空分类筛选再试。")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(theme.palette.muted)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 260)
+        .glassPanel(radius: 24)
+    }
+}
+
+private enum CognitiveGlassLevel {
+    case l1
+    case l2
+    case l3
+
+    var opacity: Double {
+        switch self {
+        case .l1: return 0.20
+        case .l2: return 0.155
+        case .l3: return 0.105
+        }
+    }
+
+    var darkOverlayOpacity: Double {
+        switch self {
+        case .l1: return 0.24
+        case .l2: return 0.34
+        case .l3: return 0.42
+        }
+    }
+
+    var borderOpacity: Double {
+        switch self {
+        case .l1: return 0.82
+        case .l2: return 0.62
+        case .l3: return 0.52
+        }
+    }
+
+    var shadowOpacity: Double {
+        switch self {
+        case .l1: return 0.38
+        case .l2: return 0.30
+        case .l3: return 0.24
+        }
+    }
+
+    var innerHighlightOpacity: Double {
+        switch self {
+        case .l1: return 0.22
+        case .l2: return 0.16
+        case .l3: return 0.12
+        }
+    }
+
+    var outerSeparationOpacity: Double {
+        switch self {
+        case .l1: return 0.16
+        case .l2: return 0.24
+        case .l3: return 0.30
+        }
+    }
+}
+
+private struct CognitiveGlassCard<Content: View>: View {
+    @Environment(\.appTheme) private var theme
+    let level: CognitiveGlassLevel
+    let radius: CGFloat
+    let isActive: Bool
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        content
+            .background(
+                ZStack {
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(Color.black.opacity(level.darkOverlayOpacity + (isActive ? 0.035 : 0)))
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(theme.palette.card.opacity(level.opacity + (isActive ? 0.05 : 0)))
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(level.innerHighlightOpacity),
+                                    Color.white.opacity(0.015),
+                                    Color.black.opacity(level.darkOverlayOpacity * 0.48)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                }
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(theme.palette.line.opacity(level.borderOpacity + (isActive ? 0.18 : 0)), lineWidth: isActive ? 1.6 : 1.2)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(Color.black.opacity(level.outerSeparationOpacity), lineWidth: 0.8)
+                    .blendMode(.multiply)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius - 1, style: .continuous)
+                    .stroke(Color.white.opacity(level.innerHighlightOpacity * 0.8), lineWidth: 0.6)
+                    .padding(1)
+            )
+            .shadow(color: theme.palette.accent.opacity(isActive ? 0.22 : 0.035), radius: isActive ? 24 : 10, x: 0, y: 0)
+            .shadow(color: Color.black.opacity(level.shadowOpacity), radius: 26, x: 0, y: 18)
+    }
+}
+
+private struct KnowledgeSectionShell<Content: View>: View {
+    @Environment(\.appTheme) private var theme
+    let compact: Bool
+    @ViewBuilder let content: Content
+
+    private var radius: CGFloat { compact ? 24 : 26 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 14 : 18) {
+            content
+        }
+        .padding(compact ? 14 : 16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(Color.black.opacity(0.24))
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(theme.palette.card.opacity(0.07))
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.09),
+                        Color.white.opacity(0.012),
+                        Color.black.opacity(0.20)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .stroke(theme.palette.line.opacity(0.50), lineWidth: 1.05)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: radius - 1, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 0.6)
+                .padding(1)
+        )
+        .shadow(color: Color.black.opacity(0.26), radius: 22, x: 0, y: 16)
+    }
+}
+
+private struct KnowledgeCoreCard: View {
+    @Environment(\.appTheme) private var theme
+    let state: KnowledgeCognitiveState
+    let todayWords: Int
+    let growthRate: Int
+    let keywords: [String]
+    let compact: Bool
+    let continueAction: () -> Void
+    @State private var isHovering = false
+
+    private var displayKeywords: [String] {
+        let scoped = keywords.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return scoped.isEmpty ? ["等待记录"] : Array(scoped.prefix(5))
+    }
+
+    private var growthText: String {
+        if growthRate > 0 { return "+\(growthRate)%" }
+        if growthRate < 0 { return "\(growthRate)%" }
+        return "0%"
+    }
+
+    var body: some View {
+        CognitiveGlassCard(level: .l1, radius: compact ? 26 : 30, isActive: isHovering) {
+            VStack(alignment: .leading, spacing: compact ? 16 : 20) {
+                HStack(alignment: .top, spacing: 16) {
+                    ZStack {
+                        Circle()
+                            .fill(theme.palette.card.opacity(0.18))
+                            .frame(width: compact ? 58 : 68, height: compact ? 58 : 68)
+                        Circle()
+                            .stroke(theme.palette.accent.opacity(0.46), lineWidth: 1.2)
+                            .frame(width: compact ? 58 : 68, height: compact ? 58 : 68)
+                        Image(systemName: state.symbol)
+                            .font(.system(size: compact ? 24 : 28, weight: .semibold))
+                            .foregroundStyle(
+                                LinearGradient(colors: [theme.palette.accent, theme.palette.warm.opacity(0.86)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                    }
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("知识状态：\(state.title)")
+                            .font(.system(size: compact ? 20 : 24, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                            .noWrap(scale: 0.72)
+                        Text(state.subtitle)
+                            .font(.system(size: compact ? 12 : 13, weight: .medium))
+                            .foregroundStyle(theme.palette.muted)
+                            .lineLimit(2)
+                    }
+
+                    Spacer(minLength: 10)
+
+                    VStack(alignment: .trailing, spacing: 5) {
+                        Text("\(todayWords)")
+                            .font(.system(size: compact ? 28 : 34, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                            .contentTransition(.numericText())
+                        Text("今日沉淀字数")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                        Text("较昨日 \(growthText)")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(growthRate >= 0 ? theme.palette.accent : theme.palette.warm)
+                    }
+                }
+
+                HStack(alignment: .center, spacing: 10) {
+                    ForEach(displayKeywords, id: \.self) { keyword in
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(theme.palette.accent.opacity(0.72))
+                                .frame(width: 6, height: 6)
+                            Text(keyword)
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundStyle(theme.palette.text.opacity(0.9))
+                                .noWrap(scale: 0.68)
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 32)
+                        .background(theme.palette.card.opacity(0.16), in: Capsule())
+                        .overlay(Capsule().stroke(theme.palette.line.opacity(0.46), lineWidth: 1))
+                    }
+                    Spacer(minLength: 8)
+                }
+
+                HStack(alignment: .center, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("下一步")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                        Text("把零散灵感继续沉淀成可复用的知识条目。")
+                            .font(.system(size: compact ? 12 : 13, weight: .medium))
+                            .foregroundStyle(theme.palette.text.opacity(0.86))
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 10)
+                    Button(action: continueAction) {
+                        Label("继续沉淀知识", systemImage: "leaf.fill")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                            .noWrap(scale: 0.76)
+                            .padding(.horizontal, compact ? 16 : 20)
+                            .frame(height: compact ? 42 : 46)
+                            .background(
+                                LinearGradient(colors: [theme.palette.accent.opacity(0.55), theme.palette.warm.opacity(0.48)], startPoint: .leading, endPoint: .trailing),
+                                in: Capsule()
+                            )
+                            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                }
+            }
+            .padding(compact ? 18 : 22)
+            .frame(maxWidth: .infinity, minHeight: compact ? 224 : 252, alignment: .topLeading)
+        }
+        .onHover { isHovering = $0 }
+        .scaleEffect(isHovering ? 1.004 : 1)
+        .animation(.spring(response: 0.24, dampingFraction: 0.88), value: isHovering)
+    }
+}
+
+private struct KnowledgeInsightSection: View {
+    @Environment(\.appTheme) private var theme
+    let trendPoints: [KnowledgeTrendPoint]
+    @Binding var selectedGranularity: KnowledgeTrendGranularity
+    let categoryShares: [KnowledgeCategoryShare]
+    let keywordNodes: [KnowledgeKeywordNode]
+    let compact: Bool
+    let selectKeyword: (String) -> Void
+
+    var body: some View {
+        KnowledgeSectionShell(compact: compact) {
+            HStack {
+                Label("辅助洞察", systemImage: "chart.bar.doc.horizontal")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text.opacity(0.9))
+                Spacer()
+                Text("用于观察趋势，不作为主要操作入口")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(theme.palette.muted.opacity(0.72))
+                    .lineLimit(1)
+            }
+
+            HStack(alignment: .top, spacing: compact ? 14 : 18) {
+                TrendMiniChart(points: trendPoints, selectedGranularity: $selectedGranularity, compact: compact)
+                TypeBarChart(shares: categoryShares, compact: compact)
+            }
+
+            TagCloudView(nodes: keywordNodes, compact: compact, selectKeyword: selectKeyword)
+        }
+    }
+}
+
+private struct TrendMiniChart: View {
+    @Environment(\.appTheme) private var theme
+    let points: [KnowledgeTrendPoint]
+    @Binding var selectedGranularity: KnowledgeTrendGranularity
+    let compact: Bool
+
+    private var visiblePoints: [KnowledgeTrendPoint] {
+        Array(points.suffix(selectedGranularity.visiblePointLimit))
+    }
+
+    private var maxCount: Int {
+        max(visiblePoints.map(\.entryCount).max() ?? 1, 1)
+    }
+
+    var body: some View {
+        CognitiveGlassCard(level: .l2, radius: 20, isActive: false) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Label("时间趋势", systemImage: "waveform.path.ecg")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text.opacity(0.86))
+                    Spacer(minLength: 6)
+                    HStack(spacing: 4) {
+                        ForEach(KnowledgeTrendGranularity.allCases) { granularity in
+                            Button {
+                                selectedGranularity = granularity
+                            } label: {
+                                Text(granularity.title)
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                                    .foregroundStyle(selectedGranularity == granularity ? theme.palette.text : theme.palette.muted)
+                                    .padding(.horizontal, 7)
+                                    .frame(height: 22)
+                                    .background(selectedGranularity == granularity ? theme.palette.accent.opacity(0.22) : Color.white.opacity(0.055), in: Capsule())
+                                    .overlay(Capsule().stroke(selectedGranularity == granularity ? theme.palette.accent.opacity(0.46) : theme.palette.line.opacity(0.24), lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .focusable(false)
+                        }
+                    }
+                }
+
+                if visiblePoints.isEmpty {
+                    Text("暂无趋势数据")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                        .frame(maxWidth: .infinity, minHeight: 72)
+                } else {
+                    HStack(alignment: .bottom, spacing: 6) {
+                        ForEach(visiblePoints, id: \.bucketStart) { point in
+                            VStack(spacing: 5) {
+                                Capsule()
+                                    .fill(theme.palette.accent.opacity(0.48))
+                                    .frame(width: compact ? 10 : 12, height: barHeight(for: point))
+                                Text(axisTitle(for: point))
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundStyle(theme.palette.muted.opacity(0.7))
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .frame(height: compact ? 82 : 92)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, minHeight: compact ? 154 : 170, alignment: .topLeading)
+        }
+    }
+
+    private func barHeight(for point: KnowledgeTrendPoint) -> CGFloat {
+        let ratio = CGFloat(point.entryCount) / CGFloat(maxCount)
+        return max(14, ratio * (compact ? 54 : 62))
+    }
+
+    private func axisTitle(for point: KnowledgeTrendPoint) -> String {
+        KnowledgeTrendAxisLabelFormatter.shortTitle(point.title, granularity: selectedGranularity)
+    }
+}
+
+private struct TypeBarChart: View {
+    @Environment(\.appTheme) private var theme
+    let shares: [KnowledgeCategoryShare]
+    let compact: Bool
+
+    private var visibleShares: [KnowledgeCategoryShare] {
+        Array(shares.prefix(4))
+    }
+
+    var body: some View {
+        CognitiveGlassCard(level: .l2, radius: 20, isActive: false) {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("类型结构", systemImage: "chart.bar.xaxis")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text.opacity(0.86))
+
+                if visibleShares.isEmpty {
+                    Text("暂无分类数据")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                        .frame(maxWidth: .infinity, minHeight: 92)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(visibleShares, id: \.category) { share in
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Label(share.category.title, systemImage: share.category.symbol)
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundStyle(theme.palette.text.opacity(0.82))
+                                        .noWrap(scale: 0.68)
+                                    Spacer()
+                                    Text("\(Int((share.ratio * 100).rounded()))%")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(theme.palette.muted.opacity(0.78))
+                                }
+                                GeometryReader { proxy in
+                                    ZStack(alignment: .leading) {
+                                        Capsule().fill(theme.palette.line.opacity(0.32))
+                                        Capsule()
+                                            .fill(theme.palette.accent.opacity(0.42))
+                                            .frame(width: max(10, proxy.size.width * CGFloat(share.ratio)))
+                                    }
+                                }
+                                .frame(height: 5)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, minHeight: compact ? 154 : 170, alignment: .topLeading)
+        }
+    }
+}
+
+private struct TagCloudView: View {
+    @Environment(\.appTheme) private var theme
+    let nodes: [KnowledgeKeywordNode]
+    let compact: Bool
+    let selectKeyword: (String) -> Void
+
+    private var visibleNodes: [KnowledgeKeywordNode] {
+        Array(nodes.prefix(compact ? 10 : 12))
+    }
+
+    var body: some View {
+        CognitiveGlassCard(level: .l2, radius: 20, isActive: false) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label("知识标签云", systemImage: "tag")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text.opacity(0.86))
+                    Spacer()
+                    Text("\(nodes.count) 个标签")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(theme.palette.muted.opacity(0.72))
+                }
+
+                if visibleNodes.isEmpty {
+                    Text("继续沉淀后会形成可搜索标签。")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: compact ? 88 : 104), spacing: 8)], alignment: .leading, spacing: 8) {
+                        ForEach(visibleNodes) { node in
+                            Button {
+                                selectKeyword(node.keyword)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(theme.palette.accent.opacity(0.7))
+                                        .frame(width: CGFloat(min(10, 5 + node.count)), height: CGFloat(min(10, 5 + node.count)))
+                                    Text(node.keyword)
+                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .foregroundStyle(theme.palette.text.opacity(0.86))
+                                        .lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 10)
+                                .frame(height: 32)
+                                .background(theme.palette.card.opacity(0.14), in: Capsule())
+                                .overlay(Capsule().stroke(theme.palette.line.opacity(0.38), lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .focusable(false)
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+}
+
+private struct KnowledgeFeedSection: View {
+    @Environment(\.appTheme) private var theme
+    let entries: [KnowledgeEntry]
+    let compact: Bool
+    let reuseEntry: (KnowledgeEntry) -> Void
+    let editEntry: (KnowledgeEntry) -> Void
+    let viewEntry: (KnowledgeEntry) -> Void
+
+    var body: some View {
+        KnowledgeSectionShell(compact: compact) {
+            HStack(alignment: .lastTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("知识流")
+                        .font(.system(size: compact ? 20 : 22, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    Text("沉淀后的可复用条目")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                }
+                Spacer()
+                Text("\(entries.count) 条")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(theme.palette.muted)
+            }
+
+            Rectangle()
+                .fill(theme.palette.line.opacity(0.28))
+                .frame(height: 1)
+
+            LazyVStack(spacing: compact ? 12 : 14) {
+                ForEach(entries) { entry in
+                    KnowledgeFeedCard(
+                        entry: entry,
+                        compact: compact,
+                        reuse: { reuseEntry(entry) },
+                        edit: { editEntry(entry) },
+                        view: { viewEntry(entry) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+private struct KnowledgeFeedCard: View {
+    @Environment(\.appTheme) private var theme
+    let entry: KnowledgeEntry
+    let compact: Bool
+    let reuse: () -> Void
+    let edit: () -> Void
+    let view: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        CognitiveGlassCard(level: .l3, radius: 20, isActive: isHovering) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: entry.category.symbol)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(theme.palette.accent.opacity(0.82))
+                        .frame(width: 34, height: 34)
+                        .background(theme.palette.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(entry.title)
+                            .font(.system(size: compact ? 14 : 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                            .lineLimit(1)
+                        Text("\(dateText(entry.date)) · \(entry.category.title) · \(entry.mood)")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.palette.muted.opacity(0.78))
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    if isHovering {
+                        HStack(spacing: 6) {
+                            feedAction("复用", "doc.on.doc", reuse)
+                            feedAction("编辑", "slider.horizontal.3", edit)
+                            feedAction("查看", "arrow.up.right", view)
+                        }
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    } else {
+                        Text("\(entry.wordCount) 字")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.palette.muted.opacity(0.72))
+                    }
+                }
+
+                Text(entry.summary)
+                    .font(.system(size: compact ? 12 : 13, weight: .medium))
+                    .foregroundStyle(theme.palette.text.opacity(0.86))
+                    .lineSpacing(3)
+                    .lineLimit(2)
+
+                FlowPillRow(items: Array(entry.keywords.prefix(5)), fallback: [entry.category.title])
+            }
+            .padding(compact ? 14 : 16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .onTapGesture(perform: edit)
+        .onHover { isHovering = $0 }
+        .scaleEffect(isHovering ? 1.004 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.86), value: isHovering)
+    }
+
+    private func feedAction(_ title: String, _ systemImage: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10, weight: .bold))
+                .labelStyle(.iconOnly)
+                .foregroundStyle(theme.palette.text.opacity(0.9))
+                .frame(width: 28, height: 28)
+                .background(theme.palette.card.opacity(0.11), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(theme.palette.line.opacity(0.22), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .help(title)
+    }
+
+    private func dateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = Calendar.current.isDateInToday(date) ? "今天 HH:mm" : "M月d日"
+        return formatter.string(from: date)
+    }
+}
+
+struct KnowledgeMetricCard: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let value: String
+    let detail: String
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(theme.palette.accent)
+                .frame(width: 36, height: 36)
+                .background(theme.palette.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(theme.palette.muted)
+                    .noWrap(scale: 0.7)
+                Text(value)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                    .noWrap(scale: 0.62)
+                Text(detail)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(theme.palette.muted.opacity(0.82))
+                    .noWrap(scale: 0.62)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 94)
+        .glassPanel(radius: 20)
+    }
+}
+
+struct KnowledgeTrendCard: View {
+    @Environment(\.appTheme) private var theme
+    let points: [KnowledgeTrendPoint]
+    @Binding var selectedGranularity: KnowledgeTrendGranularity
+    let compact: Bool
+
+    private var visiblePoints: [KnowledgeTrendPoint] {
+        Array(points.suffix(selectedGranularity.visiblePointLimit))
+    }
+
+    private var maxCount: Int {
+        max(visiblePoints.map(\.entryCount).max() ?? 1, 1)
+    }
+
+    private var cardHeight: CGFloat {
+        compact ? 190 : 210
+    }
+
+    private var totalEntries: Int {
+        visiblePoints.reduce(0) { $0 + $1.entryCount }
+    }
+
+    private var peakPoint: KnowledgeTrendPoint? {
+        visiblePoints.max {
+            if $0.entryCount == $1.entryCount { return $0.bucketStart < $1.bucketStart }
+            return $0.entryCount < $1.entryCount
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
+                Label("时间趋势", systemImage: "chart.xyaxis.line")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                Spacer(minLength: 8)
+                trendGranularityPicker
+            }
+            if visiblePoints.isEmpty {
+                emptyText("暂无趋势数据")
+            } else if visiblePoints.count == 1, let point = visiblePoints.first {
+                singlePointView(point)
+            } else {
+                HStack(alignment: .bottom, spacing: 7) {
+                    ForEach(visiblePoints, id: \.bucketStart) { point in
+                        VStack(spacing: 6) {
+                            Text("\(point.entryCount)")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(theme.palette.muted)
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [theme.palette.accent, theme.palette.warm.opacity(0.78)],
+                                        startPoint: .bottom,
+                                        endPoint: .top
+                                    )
+                                )
+                                .frame(width: compact ? 14 : 18, height: barHeight(for: point))
+                            Text(axisTitle(for: point))
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(theme.palette.muted.opacity(0.85))
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: compact ? 100 : 112)
+                trendSummary
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: cardHeight, maxHeight: cardHeight, alignment: .topLeading)
+        .glassPanel(radius: 18)
+    }
+
+    private var trendGranularityPicker: some View {
+        HStack(spacing: 4) {
+            ForEach(KnowledgeTrendGranularity.allCases) { granularity in
+                Button {
+                    selectedGranularity = granularity
+                } label: {
+                    Text(granularity.title)
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(selectedGranularity == granularity ? theme.palette.text : theme.palette.muted)
+                        .padding(.horizontal, compact ? 7 : 8)
+                        .frame(height: 24)
+                        .background(
+                            (selectedGranularity == granularity ? theme.palette.accent.opacity(0.24) : Color.white.opacity(0.03)),
+                            in: Capsule()
+                        )
+                        .overlay(Capsule().stroke(selectedGranularity == granularity ? theme.palette.accent.opacity(0.55) : theme.palette.line.opacity(0.65), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+            }
+        }
+    }
+
+    private var trendSummary: some View {
+        HStack(spacing: 8) {
+            Text("当前显示 \(totalEntries) 条")
+            if let peakPoint {
+                Text("峰值 \(axisTitle(for: peakPoint))")
+            }
+        }
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(theme.palette.muted.opacity(0.88))
+        .lineLimit(1)
+    }
+
+    private func singlePointView(_ point: KnowledgeTrendPoint) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .lastTextBaseline) {
+                Text(point.title)
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                Spacer()
+                Text("\(point.entryCount) 条")
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.accent)
+            }
+            Text("沉淀 \(point.wordCount) 字，当前维度下数据集中在这一段时间。")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(theme.palette.muted)
+                .lineLimit(2)
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(theme.palette.line.opacity(0.50))
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [theme.palette.accent, theme.palette.warm.opacity(0.78)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(24, proxy.size.width))
+                }
+            }
+            .frame(height: 8)
+        }
+        .padding(.top, compact ? 16 : 22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func barHeight(for point: KnowledgeTrendPoint) -> CGFloat {
+        let ratio = CGFloat(point.entryCount) / CGFloat(maxCount)
+        return max(compact ? 18 : 22, ratio * (compact ? 58 : 68))
+    }
+
+    private func axisTitle(for point: KnowledgeTrendPoint) -> String {
+        KnowledgeTrendAxisLabelFormatter.shortTitle(point.title, granularity: selectedGranularity)
+    }
+
+    private func emptyText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(theme.palette.muted)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct KnowledgeCategoryShareCard: View {
+    @Environment(\.appTheme) private var theme
+    let shares: [KnowledgeCategoryShare]
+    let compact: Bool
+
+    private var visibleShares: [KnowledgeCategoryShare] {
+        Array(shares.prefix(compact ? 4 : 5))
+    }
+
+    private var cardHeight: CGFloat {
+        compact ? 190 : 210
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("类型占比", systemImage: "chart.pie")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.palette.text)
+            if visibleShares.isEmpty {
+                Text("暂无分类数据")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .frame(maxWidth: .infinity, minHeight: 90)
+            } else {
+                VStack(spacing: compact ? 7 : 8) {
+                    ForEach(visibleShares, id: \.category) { share in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Label(share.category.title, systemImage: share.category.symbol)
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(theme.palette.text.opacity(0.9))
+                                    .noWrap(scale: 0.68)
+                                Spacer()
+                                Text("\(Int((share.ratio * 100).rounded()))%")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(theme.palette.muted)
+                            }
+                            GeometryReader { proxy in
+                                ZStack(alignment: .leading) {
+                                    Capsule().fill(theme.palette.line.opacity(0.50))
+                                    Capsule()
+                                        .fill(theme.palette.accent.opacity(0.72))
+                                        .frame(width: max(8, proxy.size.width * CGFloat(share.ratio)))
+                                }
+                            }
+                            .frame(height: 6)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: cardHeight, maxHeight: cardHeight, alignment: .topLeading)
+        .glassPanel(radius: 18)
+    }
+}
+
+struct KnowledgeKeywordNetworkCard: View {
+    @Environment(\.appTheme) private var theme
+    let network: KnowledgeKeywordNetwork
+    let compact: Bool
+    let selectKeyword: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("关键词网络", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                Spacer()
+                Text("\(network.nodes.count) 个节点")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(theme.palette.muted)
+            }
+            if network.nodes.isEmpty {
+                Text("暂无关键词关系，继续记录后会自动形成连接。")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+            } else {
+                HStack(spacing: 8) {
+                    ForEach(network.nodes.prefix(compact ? 6 : 8)) { node in
+                        Button {
+                            selectKeyword(node.keyword)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(theme.palette.accent.opacity(0.86))
+                                    .frame(width: CGFloat(min(12, 5 + node.count)))
+                                Text(node.keyword)
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(theme.palette.text.opacity(0.9))
+                                    .noWrap(scale: 0.7)
+                            }
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .background(theme.palette.card.opacity(0.62), in: Capsule())
+                            .overlay(Capsule().stroke(theme.palette.line, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .focusable(false)
+                    }
+                }
+                if !network.edges.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(network.edges.prefix(3)) { edge in
+                            Text("\(edge.left) · \(edge.right) · \(edge.weight) 次")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(theme.palette.muted)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .glassPanel(radius: 18)
+    }
+}
+
+struct KnowledgeCategoryChip: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(isSelected ? theme.palette.text : theme.palette.muted)
+                .noWrap(scale: 0.72)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .background(isSelected ? theme.palette.accent.opacity(0.20) : theme.palette.card.opacity(0.58), in: Capsule())
+                .overlay(Capsule().stroke(isSelected ? theme.palette.accent.opacity(0.72) : theme.palette.line, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+    }
+}
+
+struct KnowledgeEntryCard: View {
+    @Environment(\.appTheme) private var theme
+    let entry: KnowledgeEntry
+    let compact: Bool
+    let openDetail: () -> Void
+    let openSource: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: entry.category.symbol)
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(theme.palette.accent)
+                    .frame(width: 38, height: 38)
+                    .background(theme.palette.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(entry.title)
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                        .lineLimit(1)
+                    Text("\(dateText(entry.date)) · \(entry.category.title) · \(entry.mood) · \(entry.wordCount) 字")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(theme.palette.muted)
+                        .lineLimit(1)
+                }
+                Spacer()
+                HStack(spacing: 8) {
+                    Button(action: openDetail) {
+                        Label("详情", systemImage: "text.page")
+                            .font(.system(size: 11, weight: .bold))
+                            .noWrap(scale: 0.7)
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                    Button {
+                        exportWord()
+                    } label: {
+                        Label("Word", systemImage: "doc.richtext")
+                            .font(.system(size: 11, weight: .bold))
+                            .noWrap(scale: 0.7)
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                    Button {
+                        exportPDF()
+                    } label: {
+                        Label("PDF", systemImage: "doc.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .noWrap(scale: 0.7)
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                }
+            }
+
+            Text(entry.summary)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(theme.palette.text.opacity(0.92))
+                .lineSpacing(3)
+                .lineLimit(2)
+
+            HStack(alignment: .center, spacing: 10) {
+                FlowPillRow(items: entry.keywords, fallback: [entry.category.title])
+                Spacer(minLength: 10)
+                Button(action: openSource) {
+                    Label("查看原文", systemImage: "arrow.up.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .noWrap(scale: 0.7)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+        }
+        .padding(compact ? 15 : 17)
+        .glassPanel(radius: 22, active: isHovering)
+        .scaleEffect(isHovering ? 1.006 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.84), value: isHovering)
+        .onHover { isHovering = $0 }
+        .onTapGesture(perform: openDetail)
+    }
+
+    private func exportWord() {
+        NoteExporter.exportDocx(note: exportText, date: entry.date)
+    }
+
+    private func exportPDF() {
+        NoteExporter.exportPDF(note: exportText, date: entry.date)
+    }
+
+    private var exportText: String {
+        """
+        \(entry.title)
+
+        日期：\(dateText(entry.date))
+        分类：\(entry.category.title)
+        心情：\(entry.mood)
+        关键词：\(entry.keywords.isEmpty ? "暂无" : entry.keywords.joined(separator: "、"))
+
+        摘要：
+        \(entry.summary)
+
+        原始灵感：
+        \(entry.sourceText)
+        """
+    }
+
+    private func dateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "yyyy年M月d日"
+        return formatter.string(from: date)
+    }
+}
+
+struct KnowledgeDetailPanel: View {
+    @Environment(\.appTheme) private var theme
+    let entry: KnowledgeEntry
+    let compact: Bool
+    let back: () -> Void
+    let saveEdits: (KnowledgeCategory, [String]) -> Void
+    let openSource: () -> Void
+    @State private var selectedCategory: KnowledgeCategory
+    @State private var tagText: String
+
+    init(
+        entry: KnowledgeEntry,
+        compact: Bool,
+        back: @escaping () -> Void,
+        saveEdits: @escaping (KnowledgeCategory, [String]) -> Void,
+        openSource: @escaping () -> Void
+    ) {
+        self.entry = entry
+        self.compact = compact
+        self.back = back
+        self.saveEdits = saveEdits
+        self.openSource = openSource
+        _selectedCategory = State(initialValue: entry.category)
+        _tagText = State(initialValue: entry.keywords.joined(separator: "、"))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 14 : 18) {
+            HStack(alignment: .center, spacing: 12) {
+                Button(action: back) {
+                    Label("返回知识库", systemImage: "chevron.left")
+                        .font(.system(size: 12, weight: .bold))
+                        .noWrap(scale: 0.7)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                Spacer()
+                Button(action: openSource) {
+                    Label("查看当天胶囊", systemImage: "calendar")
+                        .font(.system(size: 12, weight: .bold))
+                        .noWrap(scale: 0.7)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 14) {
+                    Image(systemName: selectedCategory.symbol)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(theme.palette.accent)
+                        .frame(width: 46, height: 46)
+                        .background(theme.palette.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(entry.title)
+                            .font(.system(size: compact ? 22 : 26, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.palette.text)
+                            .lineLimit(2)
+                        Text("\(dateText(entry.date)) · \(entry.mood) · \(entry.wordCount) 字")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                    }
+                    Spacer()
+                    Button {
+                        saveEdits(selectedCategory, editedTags)
+                    } label: {
+                        Label("保存调整", systemImage: "checkmark.circle")
+                            .font(.system(size: 12, weight: .bold))
+                            .noWrap(scale: 0.7)
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                }
+
+                Text(entry.summary)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(theme.palette.text.opacity(0.9))
+                    .lineSpacing(4)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(theme.palette.card.opacity(0.46), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(theme.palette.line, lineWidth: 1))
+
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("知识分类", systemImage: "folder")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                        Picker("", selection: $selectedCategory) {
+                            ForEach(KnowledgeCategory.allCases) { category in
+                                Label(category.title, systemImage: category.symbol).tag(category)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("标签编辑", systemImage: "tag")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                        TextField("用顿号、逗号或空格分隔标签", text: $tagText)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(theme.palette.text)
+                            .padding(.horizontal, 12)
+                            .frame(height: 38)
+                            .background(theme.palette.card.opacity(0.58), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(theme.palette.line, lineWidth: 1))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("完整正文", systemImage: "doc.text")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    ScrollView(.vertical, showsIndicators: true) {
+                        Text(entry.sourceText.isEmpty ? "暂无正文内容。" : entry.sourceText)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(theme.palette.text.opacity(0.95))
+                            .lineSpacing(5)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.trailing, 10)
+                    }
+                    .frame(minHeight: compact ? 240 : 320)
+                    .padding(16)
+                    .background(theme.palette.card.opacity(0.48), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(theme.palette.line, lineWidth: 1))
+                }
+            }
+            .padding(compact ? 16 : 20)
+            .glassPanel(radius: 24)
+        }
+    }
+
+    private var editedTags: [String] {
+        tagText
+            .components(separatedBy: CharacterSet(charactersIn: "、,，;； \n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func dateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "yyyy年M月d日"
+        return formatter.string(from: date)
+    }
+}
+
+private extension String {
+    var uuidSeed: String {
+        let bytes = Array(utf8)
+        var hash: UInt64 = 1469598103934665603
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        return String(format: "00000000-0000-4000-8000-%012llx", hash & 0x0000ffffffffffff)
+    }
+}
+
 struct InspirationSeedCard: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3740,9 +5676,9 @@ struct InspirationSeedCard: View {
     @State private var animateGlow = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: compact ? 8 : 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                RoundedRectangle(cornerRadius: compact ? 21 : 23, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: [theme.palette.ink.opacity(0.30), theme.palette.surface.opacity(0.18)],
@@ -3752,7 +5688,7 @@ struct InspirationSeedCard: View {
                     )
                 Circle()
                     .fill(theme.palette.accent.opacity(0.16))
-                    .frame(width: 132, height: 132)
+                    .frame(width: compact ? 104 : 116, height: compact ? 104 : 116)
                     .blur(radius: shouldAnimateGlow && animateGlow ? 22 : 30)
                     .scaleEffect(shouldAnimateGlow && animateGlow ? 1.10 : 0.98)
                     .offset(y: 28)
@@ -3774,7 +5710,7 @@ struct InspirationSeedCard: View {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFit()
-                        .frame(height: compact ? 126 : 152)
+                        .frame(height: compact ? 104 : 122)
                         .id(stage.imageName)
                         .shadow(
                             color: PerformanceTuning.prefersReducedEffects ? .clear : theme.palette.accent.opacity(shouldAnimateGlow && animateGlow ? 0.42 : 0.24),
@@ -3811,28 +5747,28 @@ struct InspirationSeedCard: View {
                             x: 0,
                             y: PerformanceTuning.prefersReducedEffects ? 0 : 4
                         )
-                        .offset(y: compact ? 54 : 64)
+                        .offset(y: compact ? 42 : 50)
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 }
             }
-            .frame(height: compact ? 142 : 166)
+            .frame(height: compact ? 116 : 134)
             .overlay(
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                RoundedRectangle(cornerRadius: compact ? 21 : 23, style: .continuous)
                     .stroke(theme.palette.line.opacity(0.8), lineWidth: 1)
             )
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: compact ? 3 : 4) {
                 Text("今日灵感 \(noteCount) 字")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: compact ? 11.5 : 12.5, weight: .bold))
                     .foregroundStyle(theme.palette.text)
                 Text(stage.message)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: compact ? 10.5 : 11.5, weight: .medium))
                     .foregroundStyle(theme.palette.muted)
                     .lineLimit(2)
             }
         }
-        .padding(14)
-        .glassPanel(radius: 22, active: noteCount > 0)
+        .padding(compact ? 10 : 12)
+        .glassPanel(radius: compact ? 19 : 21, active: noteCount > 0)
         .onAppear {
             animateGlow = noteCount > 0 && shouldAnimateGlow
         }
@@ -4862,6 +6798,7 @@ struct CalendarDayCell: View {
     let visibleMonth: Date
     let count: Int
     let hasNote: Bool
+    let compact: Bool
 
     var body: some View {
         Group {
@@ -4869,22 +6806,22 @@ struct CalendarDayCell: View {
                 Button {
                     selectedDate = day
                 } label: {
-                    VStack(spacing: 3) {
+                    VStack(spacing: compact ? 2 : 3) {
                         Text("\(Calendar.current.component(.day, from: day))")
-                            .font(.system(size: 12, weight: isSelected ? .bold : .medium))
+                            .font(.system(size: compact ? 10.5 : 11.5, weight: isSelected ? .bold : .medium))
                             .noWrap(scale: 0.8)
-                        HStack(spacing: 3) {
+                        HStack(spacing: compact ? 2 : 3) {
                             Circle()
                                 .fill(count > 0 ? theme.palette.cyan : .clear)
-                                .frame(width: 4, height: 4)
+                                .frame(width: compact ? 3.5 : 4, height: compact ? 3.5 : 4)
                             Circle()
                                 .fill(hasNote ? theme.palette.warm : .clear)
-                                .frame(width: 4, height: 4)
+                                .frame(width: compact ? 3.5 : 4, height: compact ? 3.5 : 4)
                         }
-                        .frame(height: 4)
+                        .frame(height: compact ? 3.5 : 4)
                     }
                     .foregroundStyle(theme.palette.text)
-                    .frame(height: 28)
+                    .frame(height: compact ? 23 : 25)
                     .frame(maxWidth: .infinity)
                     .background(
                         isSelected ?
@@ -4902,7 +6839,7 @@ struct CalendarDayCell: View {
                 .hoverLift()
             } else {
                 Color.clear
-                    .frame(height: 28)
+                    .frame(height: compact ? 23 : 25)
                     .frame(maxWidth: .infinity)
             }
         }

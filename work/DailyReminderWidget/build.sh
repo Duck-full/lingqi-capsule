@@ -107,6 +107,7 @@ for ARCH in x86_64 arm64; do
     -O \
     -target "$ARCH-apple-macos13.1" \
     -parse-as-library \
+    "$ROOT/Sources/KnowledgeBaseCore.swift" \
     "$ROOT/Sources/DailyReminderWidget.swift" \
     -o "$MACOS/DailyReminderWidget-$ARCH" \
     -framework SwiftUI \
