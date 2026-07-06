@@ -6,7 +6,7 @@ import OSLog
 
 private let inspirationProgressTarget = 300
 private let inspirationCharacterLimit = 2000
-private let quickInspirationCharacterLimit = 200
+private let quickInspirationCharacterLimit = 2000
 private let defaultWindowSize = NSSize(width: 1291, height: 893)
 
 enum PerformanceDiagnostics {
@@ -2544,7 +2544,7 @@ struct MenuBarQuickPanelView: View {
     var body: some View {
         ZStack {
             QuickPanelBackground()
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 HeaderStatusView(
                     todayWordCount: todayWordCount,
                     pulse: logoPulse,
@@ -2701,15 +2701,17 @@ enum QuickPanelStyle {
 }
 
 struct QuickPanelBackground: View {
+    @Environment(\.appTheme) private var theme
+
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [QuickPanelStyle.backgroundTop, QuickPanelStyle.backgroundMiddle, QuickPanelStyle.backgroundBottom],
+                colors: [theme.palette.ink, theme.palette.plum, theme.palette.surface],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            RadialGradient(colors: [QuickPanelStyle.blue.opacity(0.20), .clear], center: .topLeading, startRadius: 8, endRadius: 300)
-            RadialGradient(colors: [QuickPanelStyle.purple.opacity(0.24), .clear], center: .bottomTrailing, startRadius: 20, endRadius: 360)
+            RadialGradient(colors: [theme.palette.glowA.opacity(0.20), .clear], center: .topLeading, startRadius: 8, endRadius: 300)
+            RadialGradient(colors: [theme.palette.glowB.opacity(0.24), .clear], center: .bottomTrailing, startRadius: 20, endRadius: 360)
             Rectangle()
                 .fill(.ultraThinMaterial)
                 .opacity(0.16)
@@ -2718,6 +2720,7 @@ struct QuickPanelBackground: View {
 }
 
 struct QuickGlassCard<Content: View>: View {
+    @Environment(\.appTheme) private var theme
     let active: Bool
     let radius: CGFloat
     let content: Content
@@ -2730,38 +2733,39 @@ struct QuickGlassCard<Content: View>: View {
 
     var body: some View {
         content
-            .background(QuickPanelStyle.card.opacity(active ? 1.32 : 1), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background(theme.palette.card.opacity(active ? 1.32 : 1), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .stroke(active ? QuickPanelStyle.strokeActive : QuickPanelStyle.stroke, lineWidth: active ? 1.2 : 1)
+                    .stroke(active ? theme.palette.accent.opacity(0.78) : theme.palette.line.opacity(1.15), lineWidth: active ? 1.2 : 1)
             )
-            .shadow(color: Color.black.opacity(active ? 0.20 : 0.12), radius: active ? 14 : 9, x: 0, y: 6)
+            .shadow(color: active ? theme.palette.accent.opacity(0.18) : Color.black.opacity(0.12), radius: active ? 14 : 9, x: 0, y: 6)
     }
 }
 
 struct HeaderStatusView: View {
+    @Environment(\.appTheme) private var theme
     let todayWordCount: Int
     let pulse: Bool
     let onRefresh: () -> Void
     @State private var hoveringRefresh = false
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 10) {
             ZStack {
                 Circle()
                     .fill(
                         RadialGradient(
-                            colors: [QuickPanelStyle.blue.opacity(0.38), QuickPanelStyle.purple.opacity(0.18), QuickPanelStyle.cardStrong],
+                            colors: [theme.palette.accent.opacity(0.40), theme.palette.glowB.opacity(0.18), theme.palette.cardStrong],
                             center: .topLeading,
                             startRadius: 4,
                             endRadius: 34
                         )
                     )
-                    .overlay(Circle().stroke(QuickPanelStyle.strokeActive.opacity(0.72), lineWidth: 1))
-                    .shadow(color: QuickPanelStyle.purple.opacity(pulse ? 0.48 : 0.24), radius: pulse ? 15 : 9, x: 0, y: 0)
+                    .overlay(Circle().stroke(theme.palette.accent.opacity(0.72), lineWidth: 1))
+                    .shadow(color: theme.palette.glowB.opacity(pulse ? 0.48 : 0.24), radius: pulse ? 15 : 9, x: 0, y: 0)
                 Image(systemName: growthStage.symbol)
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(QuickPanelStyle.green)
+                    .foregroundStyle(theme.palette.warm)
                     .scaleEffect(pulse ? 1.08 : 1.0)
             }
             .frame(width: 42, height: 42)
@@ -2770,37 +2774,60 @@ struct HeaderStatusView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("灵栖胶囊")
                     .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .foregroundStyle(QuickPanelStyle.text)
+                    .foregroundStyle(theme.palette.text)
                     .lineLimit(1)
                 Text("愿灵感慢慢发光")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(QuickPanelStyle.subText)
+                    .foregroundStyle(theme.palette.muted)
                     .lineLimit(1)
             }
             .layoutPriority(1)
             Spacer()
-            Circle()
-                .fill(QuickPanelStyle.blue)
-                .frame(width: 7, height: 7)
-            Text("本地保存")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(QuickPanelStyle.blue)
-                .lineLimit(1)
-                .minimumScaleFactor(0.82)
-                .help("所有灵感默认保存在本机，不上传云端")
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(theme.palette.accent)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: theme.palette.accent.opacity(0.45), radius: 6, x: 0, y: 0)
+                Text("本地保存")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(theme.palette.accent)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(theme.palette.accent.opacity(0.12), in: Capsule())
+            .overlay(Capsule().stroke(theme.palette.accent.opacity(0.24), lineWidth: 1))
+            .help("所有灵感默认保存在本机，不上传云端")
             Button(action: onRefresh) {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(hoveringRefresh ? QuickPanelStyle.text : QuickPanelStyle.subText)
-                    .frame(width: 26, height: 26)
-                    .background(hoveringRefresh ? QuickPanelStyle.cardStrong : Color.clear, in: Circle())
+                    .foregroundStyle(hoveringRefresh ? theme.palette.text : theme.palette.muted)
+                    .frame(width: 28, height: 28)
+                    .background(hoveringRefresh ? theme.palette.cardStrong : theme.palette.card.opacity(0.62), in: Circle())
+                    .overlay(Circle().stroke(theme.palette.line.opacity(hoveringRefresh ? 1.4 : 0.9), lineWidth: 1))
             }
             .buttonStyle(.plain)
             .focusable(false)
             .onHover { hoveringRefresh = $0 }
             .help("刷新天气")
         }
-        .frame(height: 42)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(height: 58)
+        .background(
+            LinearGradient(
+                colors: [theme.palette.cardStrong.opacity(0.92), theme.palette.card.opacity(0.62)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(theme.palette.line.opacity(1.18), lineWidth: 1)
+        )
+        .shadow(color: theme.palette.accent.opacity(0.10), radius: 14, x: 0, y: 8)
     }
 
     private var growthStage: InspirationGrowthStage {
@@ -2810,23 +2837,24 @@ struct HeaderStatusView: View {
 
 struct QuickDateWeatherBar: View {
     @EnvironmentObject private var weatherStore: WeatherStore
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         QuickGlassCard(radius: 15) {
             HStack(spacing: 8) {
-                Label(dateText, systemImage: "calendar")
+                Label(dateText, systemImage: theme.symbol(.calendar))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundStyle(QuickPanelStyle.text.opacity(0.88))
+                    .foregroundStyle(theme.palette.text.opacity(0.88))
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
                     .layoutPriority(1)
                 Spacer()
                 Image(systemName: weatherStore.info?.icon ?? "cloud.sun.fill")
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(QuickPanelStyle.blue)
+                    .foregroundStyle(theme.palette.accent)
                 Text(weatherText)
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(QuickPanelStyle.text.opacity(0.86))
+                    .foregroundStyle(theme.palette.text.opacity(0.86))
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
             }
