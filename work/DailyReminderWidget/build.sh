@@ -17,6 +17,7 @@ NOTIFICATION_ICON="$ROOT/Assets/NotificationIcon.png"
 MENU_BAR_ICON="$ROOT/Assets/MenuBarIconTemplate.png"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+BUILD_ARCH="${BUILD_ARCH:-$(uname -m)}"
 
 rm -rf "$APP" "$OUT_ROOT/$APP_NAME.dmg" "$ROOT/icon.iconset" "$DMG_ROOT"
 mkdir -p "$MACOS" "$RESOURCES" "$ROOT/icon.iconset"
@@ -102,25 +103,7 @@ for BACKGROUND in "$ROOT"/Assets/ImmersiveVistaBackground*.jpg; do
   fi
 done
 
-for ARCH in x86_64 arm64; do
-  swiftc \
-    -O \
-    -target "$ARCH-apple-macos13.1" \
-    -parse-as-library \
-    "$ROOT/Sources/KnowledgeBaseCore.swift" \
-    "$ROOT/Sources/DailyReminderWidget.swift" \
-    -o "$MACOS/DailyReminderWidget-$ARCH" \
-    -framework SwiftUI \
-    -framework AppKit \
-    -framework UserNotifications
-done
-
-lipo -create \
-  "$MACOS/DailyReminderWidget-x86_64" \
-  "$MACOS/DailyReminderWidget-arm64" \
-  -output "$MACOS/DailyReminderWidget"
-
-rm "$MACOS/DailyReminderWidget-x86_64" "$MACOS/DailyReminderWidget-arm64"
+swiftc -Onone -target "$BUILD_ARCH-apple-macos13.1" -parse-as-library "$ROOT/Sources/KnowledgeBaseCore.swift" "$ROOT/Sources/DailyReminderWidget.swift" -o "$MACOS/DailyReminderWidget" -framework SwiftUI -framework AppKit -framework UserNotifications
 
 chmod +x "$MACOS/DailyReminderWidget"
 if [[ -n "$SIGN_IDENTITY" ]]; then
