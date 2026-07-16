@@ -7,6 +7,7 @@ struct KnowledgeBaseCoreTests {
         testSearchMatchesKeywordCategoryAndBody()
         testProfileAggregatesTopDimensions()
         testAppliesManualCategoryAndEditedTags()
+        testPublishedStatusScopesKnowledgeSearch()
         testCreatesBatchExportBundleByCategoryAndMonth()
         testCombinedSearchFiltersByQueryCategoryTimeRangeAndMood()
         testTrendAggregatesByDayWithReadableChineseDate()
@@ -108,6 +109,23 @@ struct KnowledgeBaseCoreTests {
         assert(edited.keywords == ["架构设计", "性能优化"], "expected cleaned unique edited tags")
         assert(edited.sourceText == entry.sourceText, "expected full source text to be preserved")
         assert(edited.summary == entry.summary, "expected summary to be preserved")
+    }
+
+    private static func testPublishedStatusScopesKnowledgeSearch() {
+        let entries = KnowledgeBaseService.entries(from: [
+            KnowledgeSourceEntry(date: fixedDate("2026-06-07"), text: "先确认真实用户问题，再开始设计方案。", keywords: ["用户问题"], summary: "产品复盘。", mood: "专注"),
+            KnowledgeSourceEntry(date: fixedDate("2026-06-08"), text: "明天再补充这条尚未确认的灵感。", keywords: ["待整理"], summary: "未确认内容。", mood: "平稳")
+        ])
+
+        let published = KnowledgeBaseService.applyStatus(to: entries[0], status: .published)
+        let result = KnowledgeBaseService.search(
+            [published, entries[1]],
+            filter: KnowledgeSearchFilter(status: .published)
+        )
+
+        assert(entries.allSatisfy { $0.status == .inbox }, "expected source entries to start in the inbox")
+        assert(result.count == 1, "expected only published knowledge to be returned")
+        assert(result[0].id == published.id, "expected published entry to be searchable")
     }
 
     private static func testCreatesBatchExportBundleByCategoryAndMonth() {

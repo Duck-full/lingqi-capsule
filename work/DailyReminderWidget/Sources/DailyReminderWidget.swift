@@ -4167,6 +4167,7 @@ struct MoodNote: View {
 private struct KnowledgeEntryOverride: Codable {
     let categoryRawValue: String
     let keywords: [String]
+    var statusRawValue: String?
 }
 
 private struct KnowledgeMonthFilter: Identifiable, Equatable {
@@ -4253,6 +4254,7 @@ struct KnowledgeBaseView: View {
     @State private var selectedCategory: KnowledgeCategory?
     @State private var selectedMonth: KnowledgeMonthFilter?
     @State private var selectedMood: String?
+    @State private var selectedStatus: KnowledgeStatus?
     @State private var selectedTimeRange: KnowledgeQuickTimeRange = .all
     @State private var selectedTrendGranularity: KnowledgeTrendGranularity = .month
     @State private var knowledgeEntries: [KnowledgeEntry] = []
@@ -4274,12 +4276,23 @@ struct KnowledgeBaseView: View {
             category: selectedCategory,
             month: selectedMonth?.date,
             timeRange: selectedTimeRange.range(),
-            mood: selectedMood
+            mood: selectedMood,
+            status: selectedStatus
         )
     }
 
     private var filteredEntries: [KnowledgeEntry] {
         KnowledgeBaseService.search(entries, filter: activeFilter)
+    }
+
+    private var publishedKnowledgeFilter: KnowledgeSearchFilter {
+        var filter = activeFilter
+        filter.status = .published
+        return filter
+    }
+
+    private var publishedFilteredEntries: [KnowledgeEntry] {
+        KnowledgeBaseService.search(entries, filter: publishedKnowledgeFilter)
     }
 
     private var profile: KnowledgeProfile {
@@ -4349,6 +4362,7 @@ struct KnowledgeBaseView: View {
             || selectedCategory != nil
             || selectedMonth != nil
             || selectedMood != nil
+            || selectedStatus != nil
             || selectedTimeRange != .all
     }
 
@@ -4359,14 +4373,18 @@ struct KnowledgeBaseView: View {
                 if let detailEntry {
                     KnowledgeDetailPanel(entry: detailEntry, compact: compact) {
                         self.detailEntry = nil
-                    } saveEdits: { category, keywords in
-                        saveEntryEdits(entry: detailEntry, category: category, keywords: keywords)
+                    } saveEdits: { category, keywords, status in
+                        saveEntryEdits(entry: detailEntry, category: category, keywords: keywords, status: status)
                     } openSource: {
                         selectedDate = detailEntry.date
                         showingKnowledgeBase = false
                     }
                 } else {
-                    cognitiveHomePanel
+                    if profile.totalEntries > 0 {
+                        cognitiveHomePanel
+                    } else {
+                        inboxHint
+                    }
                     searchPanel
                     if filteredEntries.isEmpty {
                         emptyState
@@ -4402,6 +4420,7 @@ struct KnowledgeBaseView: View {
         .onChange(of: selectedCategory) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedMonth) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedMood) { _ in refreshKnowledgeDerivedState() }
+        .onChange(of: selectedStatus) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedTimeRange) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedTrendGranularity) { _ in refreshKnowledgeDerivedState() }
     }
@@ -4431,11 +4450,11 @@ struct KnowledgeBaseView: View {
     }
 
     private func refreshKnowledgeDerivedState(allEntries: [KnowledgeEntry]) {
-        let visibleEntries = KnowledgeBaseService.search(allEntries, filter: activeFilter)
-        profileSnapshot = KnowledgeBaseService.profile(from: visibleEntries)
-        trendPoints = KnowledgeBaseService.trend(from: allEntries, filter: activeFilter, granularity: selectedTrendGranularity)
-        categoryShares = KnowledgeBaseService.categoryShares(from: allEntries, filter: activeFilter)
-        keywordNetwork = KnowledgeBaseService.keywordNetwork(from: allEntries, filter: activeFilter)
+        let visiblePublishedEntries = KnowledgeBaseService.search(allEntries, filter: publishedKnowledgeFilter)
+        profileSnapshot = KnowledgeBaseService.profile(from: visiblePublishedEntries)
+        trendPoints = KnowledgeBaseService.trend(from: allEntries, filter: publishedKnowledgeFilter, granularity: selectedTrendGranularity)
+        categoryShares = KnowledgeBaseService.categoryShares(from: allEntries, filter: publishedKnowledgeFilter)
+        keywordNetwork = KnowledgeBaseService.keywordNetwork(from: allEntries, filter: publishedKnowledgeFilter)
     }
 
     private func applyOverride(to entry: KnowledgeEntry) -> KnowledgeEntry {
@@ -4443,12 +4462,21 @@ struct KnowledgeBaseView: View {
               let category = KnowledgeCategory(rawValue: override.categoryRawValue) else {
             return entry
         }
-        return KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: override.keywords)
+        let edited = KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: override.keywords)
+        let status = KnowledgeStatus(rawValue: override.statusRawValue ?? "") ?? .published
+        return KnowledgeBaseService.applyStatus(to: edited, status: status)
     }
 
-    private func saveEntryEdits(entry: KnowledgeEntry, category: KnowledgeCategory, keywords: [String]) {
-        let edited = KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: keywords)
-        entryOverrides[entry.id.uuidString] = KnowledgeEntryOverride(categoryRawValue: edited.category.rawValue, keywords: edited.keywords)
+    private func saveEntryEdits(entry: KnowledgeEntry, category: KnowledgeCategory, keywords: [String], status: KnowledgeStatus) {
+        let edited = KnowledgeBaseService.applyStatus(
+            to: KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: keywords),
+            status: status
+        )
+        entryOverrides[entry.id.uuidString] = KnowledgeEntryOverride(
+            categoryRawValue: edited.category.rawValue,
+            keywords: edited.keywords,
+            statusRawValue: edited.status.rawValue
+        )
         persistOverrides()
         knowledgeEntries = knowledgeEntries.map { $0.id == edited.id ? edited : $0 }
         refreshKnowledgeDerivedState()
@@ -4522,6 +4550,28 @@ struct KnowledgeBaseView: View {
         }
     }
 
+    private var inboxHint: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "tray.full.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(theme.palette.accent)
+                .frame(width: 44, height: 44)
+                .background(theme.palette.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            VStack(alignment: .leading, spacing: 5) {
+                Text("先从待沉淀内容中确认结论")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                Text("打开一条历史灵感，补充分类和标签后选择“已沉淀”。发布后才会进入搜索、导出和洞察。")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(compact ? 14 : 16)
+        .glassPanel(radius: 20)
+    }
+
     private var profilePanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: compact ? 10 : 12) {
@@ -4584,6 +4634,19 @@ struct KnowledgeBaseView: View {
                         let count = profile.categoryCounts[category, default: 0]
                         KnowledgeCategoryChip(title: "\(category.title) \(count)", isSelected: selectedCategory == category) {
                             selectedCategory = category
+                        }
+                    }
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    KnowledgeCategoryChip(title: "全部状态", isSelected: selectedStatus == nil) {
+                        selectedStatus = nil
+                    }
+                    ForEach(KnowledgeStatus.allCases) { status in
+                        KnowledgeCategoryChip(title: status.title, isSelected: selectedStatus == status) {
+                            selectedStatus = selectedStatus == status ? nil : status
                         }
                     }
                 }
@@ -4664,7 +4727,7 @@ struct KnowledgeBaseView: View {
                     .noWrap(scale: 0.72)
             }
             .buttonStyle(SecondaryButtonStyle())
-            .disabled(filteredEntries.isEmpty)
+            .disabled(publishedFilteredEntries.isEmpty)
             Button {
                 exportBatchPDF()
             } label: {
@@ -4673,7 +4736,7 @@ struct KnowledgeBaseView: View {
                     .noWrap(scale: 0.72)
             }
             .buttonStyle(SecondaryButtonStyle())
-            .disabled(filteredEntries.isEmpty)
+            .disabled(publishedFilteredEntries.isEmpty)
         }
         .padding(compact ? 14 : 16)
         .glassPanel(radius: 20)
@@ -4683,17 +4746,17 @@ struct KnowledgeBaseView: View {
         var parts = [selectedCategory?.title ?? "全部分类", selectedMonth?.title ?? "全部月份"]
         if selectedTimeRange != .all { parts.append(selectedTimeRange.title) }
         if let selectedMood { parts.append("心情 \(selectedMood)") }
-        parts.append("\(filteredEntries.count) 条知识")
+        parts.append("\(publishedFilteredEntries.count) 条已沉淀知识")
         return parts.joined(separator: " · ")
     }
 
     private func exportBatchWord() {
-        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: activeFilter, includeProfile: true)
+        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: publishedKnowledgeFilter, includeProfile: true)
         NoteExporter.exportKnowledgeDocx(bundle: bundle)
     }
 
     private func exportBatchPDF() {
-        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: activeFilter, includeProfile: true)
+        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: publishedKnowledgeFilter, includeProfile: true)
         NoteExporter.exportKnowledgePDF(bundle: bundle)
     }
 
@@ -4718,6 +4781,7 @@ struct KnowledgeBaseView: View {
         selectedCategory = nil
         selectedMonth = nil
         selectedMood = nil
+        selectedStatus = nil
         selectedTimeRange = .all
     }
 
@@ -4729,7 +4793,7 @@ struct KnowledgeBaseView: View {
             Text(entries.isEmpty ? "还没有可沉淀的知识" : "没有匹配的知识条目")
                 .font(.system(size: 18, weight: .bold, design: .rounded))
                 .foregroundStyle(theme.palette.text)
-            Text(entries.isEmpty ? "继续记录今日胶囊，知识库会自动从历史灵感中归纳。" : "换一个关键词或清空分类筛选再试。")
+            Text(entries.isEmpty ? "继续记录今日胶囊，再从候选内容中确认值得复用的结论。" : "换一个关键词或清空分类筛选再试。")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(theme.palette.muted)
                 .multilineTextAlignment(.center)
@@ -5245,10 +5309,10 @@ private struct KnowledgeFeedSection: View {
         KnowledgeSectionShell(compact: compact) {
             HStack(alignment: .lastTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("知识流")
+                    Text("知识收件箱")
                         .font(.system(size: compact ? 20 : 22, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.palette.text)
-                    Text("沉淀后的可复用条目")
+                    Text("待沉淀候选与已确认的可复用条目")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(theme.palette.muted)
                 }
@@ -5301,7 +5365,7 @@ private struct KnowledgeFeedCard: View {
                             .font(.system(size: compact ? 14 : 15, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.palette.text)
                             .lineLimit(1)
-                        Text("\(dateText(entry.date)) · \(entry.category.title) · \(entry.mood)")
+                        Text("\(entry.status.title) · \(dateText(entry.date)) · \(entry.category.title) · \(entry.mood)")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(theme.palette.muted.opacity(0.78))
                             .lineLimit(1)
@@ -5311,7 +5375,9 @@ private struct KnowledgeFeedCard: View {
 
                     if isHovering {
                         HStack(spacing: 6) {
-                            feedAction("复用", "doc.on.doc", reuse)
+                            if entry.status == .published {
+                                feedAction("复用", "doc.on.doc", reuse)
+                            }
                             feedAction("编辑", "slider.horizontal.3", edit)
                             feedAction("查看", "arrow.up.right", view)
                         }
@@ -5819,16 +5885,17 @@ struct KnowledgeDetailPanel: View {
     let entry: KnowledgeEntry
     let compact: Bool
     let back: () -> Void
-    let saveEdits: (KnowledgeCategory, [String]) -> Void
+    let saveEdits: (KnowledgeCategory, [String], KnowledgeStatus) -> Void
     let openSource: () -> Void
     @State private var selectedCategory: KnowledgeCategory
+    @State private var selectedStatus: KnowledgeStatus
     @State private var tagText: String
 
     init(
         entry: KnowledgeEntry,
         compact: Bool,
         back: @escaping () -> Void,
-        saveEdits: @escaping (KnowledgeCategory, [String]) -> Void,
+        saveEdits: @escaping (KnowledgeCategory, [String], KnowledgeStatus) -> Void,
         openSource: @escaping () -> Void
     ) {
         self.entry = entry
@@ -5837,6 +5904,7 @@ struct KnowledgeDetailPanel: View {
         self.saveEdits = saveEdits
         self.openSource = openSource
         _selectedCategory = State(initialValue: entry.category)
+        _selectedStatus = State(initialValue: entry.status)
         _tagText = State(initialValue: entry.keywords.joined(separator: "、"))
     }
 
@@ -5876,9 +5944,9 @@ struct KnowledgeDetailPanel: View {
                     }
                     Spacer()
                     Button {
-                        saveEdits(selectedCategory, editedTags)
+                        saveEdits(selectedCategory, editedTags, selectedStatus)
                     } label: {
-                        Label("保存调整", systemImage: "checkmark.circle")
+                        Label(selectedStatus == .published ? "发布知识" : "保存调整", systemImage: "checkmark.circle")
                             .font(.system(size: 12, weight: .bold))
                             .noWrap(scale: 0.7)
                     }
@@ -5902,6 +5970,20 @@ struct KnowledgeDetailPanel: View {
                         Picker("", selection: $selectedCategory) {
                             ForEach(KnowledgeCategory.allCases) { category in
                                 Label(category.title, systemImage: category.symbol).tag(category)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("沉淀状态", systemImage: "tray")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                        Picker("", selection: $selectedStatus) {
+                            ForEach(KnowledgeStatus.allCases) { status in
+                                Text(status.title).tag(status)
                             }
                         }
                         .labelsHidden()

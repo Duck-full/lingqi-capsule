@@ -36,6 +36,22 @@ enum KnowledgeCategory: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum KnowledgeStatus: String, Codable, CaseIterable, Identifiable {
+    case inbox
+    case published
+    case archived
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .inbox: return "待沉淀"
+        case .published: return "已沉淀"
+        case .archived: return "已归档"
+        }
+    }
+}
+
 struct KnowledgeSourceEntry: Identifiable, Equatable {
     let id: UUID
     let date: Date
@@ -64,6 +80,7 @@ struct KnowledgeEntry: Identifiable, Codable, Equatable {
     let mood: String
     let sourceText: String
     let wordCount: Int
+    let status: KnowledgeStatus
 }
 
 struct KnowledgeProfile: Equatable {
@@ -90,19 +107,22 @@ struct KnowledgeSearchFilter: Codable, Equatable {
     var month: Date?
     var timeRange: KnowledgeTimeRange?
     var mood: String?
+    var status: KnowledgeStatus?
 
     init(
         query: String = "",
         category: KnowledgeCategory? = nil,
         month: Date? = nil,
         timeRange: KnowledgeTimeRange? = nil,
-        mood: String? = nil
+        mood: String? = nil,
+        status: KnowledgeStatus? = nil
     ) {
         self.query = query
         self.category = category
         self.month = month
         self.timeRange = timeRange
         self.mood = mood
+        self.status = status
     }
 }
 
@@ -217,6 +237,7 @@ enum KnowledgeBaseService {
         let calendar = Calendar.current
         return entries.filter { entry in
             if let category = filter.category, entry.category != category { return false }
+            if let status = filter.status, entry.status != status { return false }
             if let month = filter.month, !calendar.isDate(entry.date, equalTo: month, toGranularity: .month) { return false }
             if let range = filter.timeRange {
                 if let start = range.start, entry.date < calendar.startOfDay(for: start) { return false }
@@ -373,7 +394,23 @@ enum KnowledgeBaseService {
             category: category,
             mood: entry.mood,
             sourceText: entry.sourceText,
-            wordCount: entry.wordCount
+            wordCount: entry.wordCount,
+            status: entry.status
+        )
+    }
+
+    static func applyStatus(to entry: KnowledgeEntry, status: KnowledgeStatus) -> KnowledgeEntry {
+        KnowledgeEntry(
+            id: entry.id,
+            date: entry.date,
+            title: entry.title,
+            summary: entry.summary,
+            keywords: entry.keywords,
+            category: entry.category,
+            mood: entry.mood,
+            sourceText: entry.sourceText,
+            wordCount: entry.wordCount,
+            status: status
         )
     }
 
@@ -419,7 +456,8 @@ enum KnowledgeBaseService {
             category: category,
             mood: source.mood,
             sourceText: text,
-            wordCount: text.count
+            wordCount: text.count,
+            status: .inbox
         )
     }
 
