@@ -219,6 +219,13 @@ enum KnowledgeBaseService {
     ]
 
     private static let lowValueTokens = Set(["今天", "进行", "需要", "继续", "相关", "内容", "一个", "一些", "以及", "整体", "部分"])
+    private static let invalidKeywordPrefixes = ["了", "的", "对", "把", "将", "与", "和", "及", "并", "再"]
+    private static let invalidKeywordSuffixes = ["了", "的", "对", "把", "将", "与", "和", "及", "并", "再"]
+    private static let semanticPhraseCandidates = [
+        "应急联动", "将城市运行", "城市管理", "城市运行", "数据标准", "数据口径", "统计规则", "字段说明",
+        "需求文档", "章节内容", "导出格式", "内容梳理", "文档复核", "项目推进", "模型中心", "知识库",
+        "产品体验", "视觉优化", "性能优化", "构建脚本", "发布方案", "搜索增强", "用户路径", "页面留白"
+    ]
 
     static func entries(from sources: [KnowledgeSourceEntry]) -> [KnowledgeEntry] {
         sources
@@ -479,6 +486,11 @@ enum KnowledgeBaseService {
             if result.count == 6 { return result }
         }
 
+        for phrase in semanticPhrases(from: text) {
+            appendKeyword(phrase, to: &result)
+            if result.count == 6 { return result }
+        }
+
         let separators = CharacterSet.whitespacesAndNewlines
             .union(.punctuationCharacters)
             .union(CharacterSet(charactersIn: "，。！？、；：,.!?;:（）()【】[]《》<>“”\"'"))
@@ -488,6 +500,10 @@ enum KnowledgeBaseService {
             .filter { $0.count >= 2 }
 
         for fragment in fragments {
+            for phrase in semanticPhrases(from: fragment) {
+                appendKeyword(phrase, to: &result)
+                if result.count == 6 { return result }
+            }
             if let semantic = semanticKeyword(from: fragment) {
                 appendKeyword(semantic, to: &result)
                 if result.count == 6 { return result }
@@ -498,23 +514,46 @@ enum KnowledgeBaseService {
 
     private static func appendKeyword(_ keyword: String, to result: inout [String]) {
         let normalized = normalizeKeyword(keyword)
-        guard normalized.count >= 2, normalized.count <= 8, !lowValueTokens.contains(normalized), !result.contains(normalized) else { return }
+        guard normalized.count >= 2,
+              normalized.count <= 8,
+              !lowValueTokens.contains(normalized),
+              !isBrokenKeyword(normalized),
+              !result.contains(normalized) else { return }
         result.append(normalized)
     }
 
     private static func semanticKeyword(from fragment: String) -> String? {
         let cleaned = normalizeKeyword(fragment)
         guard cleaned.count >= 2 else { return nil }
-        if cleaned.count <= 8, !lowValueTokens.contains(cleaned) {
+        if let phrase = semanticPhrases(from: cleaned).first {
+            return phrase
+        }
+        if cleaned.count <= 8, !lowValueTokens.contains(cleaned), !isBrokenKeyword(cleaned) {
             return cleaned
         }
         for connector in ["以及", "进行", "需要", "关于", "针对", "和", "与", "的"] {
             let pieces = cleaned.components(separatedBy: connector).map(normalizeKeyword)
-            if let piece = pieces.first(where: { $0.count >= 2 && $0.count <= 8 && !lowValueTokens.contains($0) }) {
+            if let phrase = pieces.flatMap(semanticPhrases).first {
+                return phrase
+            }
+            if let piece = pieces.first(where: { $0.count >= 2 && $0.count <= 8 && !lowValueTokens.contains($0) && !isBrokenKeyword($0) }) {
                 return piece
             }
         }
         return nil
+    }
+
+    private static func semanticPhrases(from text: String) -> [String] {
+        let cleaned = normalizeKeyword(text)
+        guard !cleaned.isEmpty else { return [] }
+        return semanticPhraseCandidates.filter { cleaned.localizedCaseInsensitiveContains($0) }
+    }
+
+    private static func isBrokenKeyword(_ keyword: String) -> Bool {
+        if invalidKeywordPrefixes.contains(where: { keyword.hasPrefix($0) }) { return true }
+        if invalidKeywordSuffixes.contains(where: { keyword.hasSuffix($0) }) { return true }
+        if keyword.contains("进行了") || keyword.contains("需要对") { return true }
+        return false
     }
 
     private static func title(for source: KnowledgeSourceEntry, keywords: [String], category: KnowledgeCategory) -> String {

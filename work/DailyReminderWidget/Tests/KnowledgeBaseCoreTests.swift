@@ -6,6 +6,7 @@ struct KnowledgeBaseCoreTests {
         testBuildsCategorizedKnowledgeEntries()
         testSearchMatchesKeywordCategoryAndBody()
         testProfileAggregatesTopDimensions()
+        testKnowledgeTagsAvoidBrokenFragmentsAndPreferSemanticPhrases()
         testAppliesManualCategoryAndEditedTags()
         testPublishedStatusScopesKnowledgeSearch()
         testCreatesBatchExportBundleByCategoryAndMonth()
@@ -86,6 +87,25 @@ struct KnowledgeBaseCoreTests {
         assert(profile.totalEntries == 2, "expected two profile entries")
         assert(profile.dominantCategory == .projectManagement, "expected dominant project category")
         assert(profile.topKeywords.contains("需求排期") || profile.topKeywords.contains("需求文档"), "expected project keyword")
+    }
+
+    private static func testKnowledgeTagsAvoidBrokenFragmentsAndPreferSemanticPhrases() {
+        let entry = KnowledgeBaseService.entries(from: [
+            KnowledgeSourceEntry(
+                date: fixedDate("2026-07-17"),
+                text: "今天对城市管理驾驶舱涉及的数据口径进行了复核，并对统计规则进行了再梳理，补充字段说明与数据标准。",
+                keywords: [],
+                summary: "复核数据口径和统计规则。",
+                mood: "专注"
+            )
+        ])[0]
+
+        assert(!entry.keywords.contains("了复核"), "expected broken verb fragment to be rejected")
+        assert(!entry.keywords.contains("了再梳理"), "expected broken rework fragment to be rejected")
+        assert(!entry.keywords.contains("再梳理"), "expected incomplete action fragment to be rejected")
+        assert(entry.keywords.contains("数据口径"), "expected complete semantic phrase")
+        assert(entry.keywords.contains("统计规则"), "expected complete semantic phrase")
+        assert(entry.keywords.contains("字段说明") || entry.keywords.contains("数据标准"), "expected complete supporting semantic phrase")
     }
 
     private static func testAppliesManualCategoryAndEditedTags() {
