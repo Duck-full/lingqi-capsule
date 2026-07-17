@@ -6,7 +6,9 @@ struct KnowledgeBaseCoreTests {
         testBuildsCategorizedKnowledgeEntries()
         testSearchMatchesKeywordCategoryAndBody()
         testProfileAggregatesTopDimensions()
+        testKnowledgeTagsAvoidBrokenFragmentsAndPreferSemanticPhrases()
         testAppliesManualCategoryAndEditedTags()
+        testPublishedStatusScopesKnowledgeSearch()
         testCreatesBatchExportBundleByCategoryAndMonth()
         testCombinedSearchFiltersByQueryCategoryTimeRangeAndMood()
         testTrendAggregatesByDayWithReadableChineseDate()
@@ -87,6 +89,25 @@ struct KnowledgeBaseCoreTests {
         assert(profile.topKeywords.contains("需求排期") || profile.topKeywords.contains("需求文档"), "expected project keyword")
     }
 
+    private static func testKnowledgeTagsAvoidBrokenFragmentsAndPreferSemanticPhrases() {
+        let entry = KnowledgeBaseService.entries(from: [
+            KnowledgeSourceEntry(
+                date: fixedDate("2026-07-17"),
+                text: "今天对城市管理驾驶舱涉及的数据口径进行了复核，并对统计规则进行了再梳理，补充字段说明与数据标准。",
+                keywords: [],
+                summary: "复核数据口径和统计规则。",
+                mood: "专注"
+            )
+        ])[0]
+
+        assert(!entry.keywords.contains("了复核"), "expected broken verb fragment to be rejected")
+        assert(!entry.keywords.contains("了再梳理"), "expected broken rework fragment to be rejected")
+        assert(!entry.keywords.contains("再梳理"), "expected incomplete action fragment to be rejected")
+        assert(entry.keywords.contains("数据口径"), "expected complete semantic phrase")
+        assert(entry.keywords.contains("统计规则"), "expected complete semantic phrase")
+        assert(entry.keywords.contains("字段说明") || entry.keywords.contains("数据标准"), "expected complete supporting semantic phrase")
+    }
+
     private static func testAppliesManualCategoryAndEditedTags() {
         let entry = KnowledgeBaseService.entries(from: [
             KnowledgeSourceEntry(
@@ -108,6 +129,23 @@ struct KnowledgeBaseCoreTests {
         assert(edited.keywords == ["架构设计", "性能优化"], "expected cleaned unique edited tags")
         assert(edited.sourceText == entry.sourceText, "expected full source text to be preserved")
         assert(edited.summary == entry.summary, "expected summary to be preserved")
+    }
+
+    private static func testPublishedStatusScopesKnowledgeSearch() {
+        let entries = KnowledgeBaseService.entries(from: [
+            KnowledgeSourceEntry(date: fixedDate("2026-06-07"), text: "先确认真实用户问题，再开始设计方案。", keywords: ["用户问题"], summary: "产品复盘。", mood: "专注"),
+            KnowledgeSourceEntry(date: fixedDate("2026-06-08"), text: "明天再补充这条尚未确认的灵感。", keywords: ["待整理"], summary: "未确认内容。", mood: "平稳")
+        ])
+
+        let published = KnowledgeBaseService.applyStatus(to: entries[0], status: .published)
+        let result = KnowledgeBaseService.search(
+            [published, entries[1]],
+            filter: KnowledgeSearchFilter(status: .published)
+        )
+
+        assert(entries.allSatisfy { $0.status == .inbox }, "expected source entries to start in the inbox")
+        assert(result.count == 1, "expected only published knowledge to be returned")
+        assert(result[0].id == published.id, "expected published entry to be searchable")
     }
 
     private static func testCreatesBatchExportBundleByCategoryAndMonth() {

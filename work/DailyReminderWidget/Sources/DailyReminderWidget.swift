@@ -73,6 +73,7 @@ enum PerformanceDiagnostics {
 
 enum QuickPanelRoute: String {
     case today
+    case dailyInspiration
     case summary
     case history
     case theme
@@ -82,6 +83,7 @@ enum QuickPanelRoute: String {
 extension Notification.Name {
     static let quickPanelRouteRequested = Notification.Name("local.codex.lingqi.quickPanelRouteRequested")
     static let quickInspirationSaved = Notification.Name("local.codex.lingqi.quickInspirationSaved")
+    static let dailyQuestionAnswered = Notification.Name("local.codex.lingqi.dailyQuestionAnswered")
 }
 
 enum MainWindowPresenter {
@@ -560,6 +562,25 @@ final class NoteStore: ObservableObject {
         setNote(merged, for: date)
     }
 
+    func appendDailyInspiration(question: DailyQuestion, answer: String, for date: Date = Date()) {
+        let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let text = """
+        ---
+
+        【今日启发】
+        问题：
+        \(question.question)
+
+        我的回答：
+        \(trimmed)
+
+        时间：
+        \(Self.answerTimeFormatter.string(from: Date()))
+        """
+        appendNote(text, for: date)
+    }
+
     func recentInspirations(limit: Int = 3) -> [RecentInspiration] {
         var result: [RecentInspiration] = []
         let sortedKeys = notesByDate.keys.sorted(by: >)
@@ -670,6 +691,13 @@ final class NoteStore: ObservableObject {
         }
     }
 
+    private static let answerTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
     #if PERFORMANCE_BENCHMARK
     func replaceAllForBenchmark(_ notes: [String: String]) {
         notesByDate = notes
@@ -707,6 +735,241 @@ struct RecentInspiration: Identifiable, Equatable {
         formatter.locale = Locale(identifier: "zh_Hans_CN")
         formatter.dateFormat = "M月d日"
         return formatter.string(from: date)
+    }
+}
+
+enum DailyQuestionCategory: String, Codable, CaseIterable {
+    case product
+    case design
+    case growth
+    case emotion
+    case creativity
+
+    var title: String {
+        switch self {
+        case .product: return "产品思考"
+        case .design: return "设计灵感"
+        case .growth: return "成长记录"
+        case .emotion: return "情绪记录"
+        case .creativity: return "创意探索"
+        }
+    }
+}
+
+struct DailyQuestion: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var date: Date
+    var question: String
+    var category: DailyQuestionCategory
+    var answer: String?
+    var keywords: [String]
+    var createdAt = Date()
+    var answeredAt: Date?
+}
+
+protocol DailyQuestionProvider {
+    func getQuestion(for date: Date) -> DailyQuestion
+}
+
+struct DailyQuestionRepository {
+    struct Template {
+        let question: String
+        let category: DailyQuestionCategory
+        let keywords: [String]
+    }
+
+    var questionCount: Int { templates.count }
+
+    func template(at index: Int) -> Template {
+        templates[index % templates.count]
+    }
+
+    private let templates: [Template] = [
+        .init(question: "如果重新设计一个 App，你最想改变什么？", category: .product, keywords: ["产品设计", "体验优化"]),
+        .init(question: "最近哪个产品体验让你印象深刻？", category: .product, keywords: ["产品体验", "观察"]),
+        .init(question: "一个好产品最应该帮用户省下什么？", category: .product, keywords: ["用户价值", "效率"]),
+        .init(question: "你今天遇到的一个小麻烦，可以被怎样的工具解决？", category: .product, keywords: ["问题发现", "工具"]),
+        .init(question: "哪个 App 的第一次使用体验值得学习？", category: .product, keywords: ["新手体验", "产品"]),
+        .init(question: "如果把一个复杂功能删掉一半，你会保留什么？", category: .product, keywords: ["取舍", "核心功能"]),
+        .init(question: "最近有什么产品让你感到被理解？", category: .product, keywords: ["用户共情", "体验"]),
+        .init(question: "一个功能什么时候应该保持沉默？", category: .product, keywords: ["克制", "产品判断"]),
+        .init(question: "你最常用的 App 里，哪个细节降低了你的负担？", category: .product, keywords: ["细节", "负担"]),
+        .init(question: "如果今天只能优化一个按钮，你会优化哪个？", category: .product, keywords: ["交互", "按钮"]),
+        .init(question: "什么样的提醒不会打扰你？", category: .product, keywords: ["提醒", "节奏"]),
+        .init(question: "你最近放弃使用一个产品的原因是什么？", category: .product, keywords: ["流失", "摩擦"]),
+        .init(question: "一个产品怎样表达信任感？", category: .product, keywords: ["信任", "品牌"]),
+        .init(question: "如果为自己做一款工具，它每天只做一件什么事？", category: .product, keywords: ["个人工具", "MVP"]),
+        .init(question: "哪类功能看起来很强大，但其实让人更累？", category: .product, keywords: ["复杂度", "克制"]),
+        .init(question: "你今天看到的一个真实需求是什么？", category: .product, keywords: ["需求", "观察"]),
+        .init(question: "一个产品的空状态可以怎样更温柔？", category: .product, keywords: ["空状态", "文案"]),
+        .init(question: "如果用户只有十秒，你希望他完成什么？", category: .product, keywords: ["路径", "效率"]),
+        .init(question: "哪个功能值得被藏得更深一点？", category: .product, keywords: ["信息架构", "优先级"]),
+        .init(question: "一个产品如何让人愿意第二天再回来？", category: .product, keywords: ["留存", "习惯"]),
+        .init(question: "最近看到哪个设计让你眼前一亮？", category: .design, keywords: ["设计灵感", "视觉"]),
+        .init(question: "什么样的设计细节让你觉得高级？", category: .design, keywords: ["细节", "质感"]),
+        .init(question: "你今天注意到的一个配色是什么感觉？", category: .design, keywords: ["配色", "感受"]),
+        .init(question: "哪个界面的留白让你觉得舒服？", category: .design, keywords: ["留白", "界面"]),
+        .init(question: "如果用一个词描述今天的视觉灵感，会是什么？", category: .design, keywords: ["视觉", "关键词"]),
+        .init(question: "什么样的动效让你感到自然？", category: .design, keywords: ["动效", "自然"]),
+        .init(question: "一个安静的界面应该避免什么？", category: .design, keywords: ["安静", "克制"]),
+        .init(question: "今天有什么材质、光影或纹理值得记录？", category: .design, keywords: ["材质", "光影"]),
+        .init(question: "哪种字体气质适合陪伴型产品？", category: .design, keywords: ["字体", "气质"]),
+        .init(question: "一个卡片如何显得轻，而不是廉价？", category: .design, keywords: ["卡片", "质感"]),
+        .init(question: "你见过最舒服的输入框是什么样的？", category: .design, keywords: ["输入", "交互"]),
+        .init(question: "什么样的图标会让你想点击？", category: .design, keywords: ["图标", "吸引力"]),
+        .init(question: "如果把今天的心情做成背景，会是什么颜色？", category: .design, keywords: ["情绪", "颜色"]),
+        .init(question: "一个界面如何表达安全感？", category: .design, keywords: ["安全感", "界面"]),
+        .init(question: "最近哪个页面的层次最清楚？", category: .design, keywords: ["层次", "页面"]),
+        .init(question: "什么样的阴影不会显得吵？", category: .design, keywords: ["阴影", "克制"]),
+        .init(question: "一个按钮如何在不抢眼的情况下可被发现？", category: .design, keywords: ["按钮", "可发现性"]),
+        .init(question: "今天你想借鉴哪一个现实世界的细节？", category: .design, keywords: ["现实灵感", "细节"]),
+        .init(question: "哪种布局让你更愿意停留？", category: .design, keywords: ["布局", "停留"]),
+        .init(question: "一个设计怎样做到有温度但不甜腻？", category: .design, keywords: ["温度", "克制"]),
+        .init(question: "今天完成的一件最有价值的事情是什么？", category: .growth, keywords: ["工作复盘", "价值"]),
+        .init(question: "今天最大的收获是什么？", category: .growth, keywords: ["收获", "复盘"]),
+        .init(question: "今天哪一刻让你觉得自己在进步？", category: .growth, keywords: ["进步", "觉察"]),
+        .init(question: "最近学会了什么新的技能？", category: .growth, keywords: ["学习", "技能"]),
+        .init(question: "未来一个月最想提升什么能力？", category: .growth, keywords: ["能力", "目标"]),
+        .init(question: "今天有什么事情值得复盘但不必苛责？", category: .growth, keywords: ["复盘", "温和"]),
+        .init(question: "哪件小事证明你比以前更稳定了？", category: .growth, keywords: ["稳定", "成长"]),
+        .init(question: "你今天主动解决了什么问题？", category: .growth, keywords: ["解决问题", "主动"]),
+        .init(question: "有什么知识你想用自己的话重新讲一遍？", category: .growth, keywords: ["知识", "表达"]),
+        .init(question: "今天的一个判断是否比过去更清晰？", category: .growth, keywords: ["判断", "清晰"]),
+        .init(question: "你想把哪件事做得更慢但更好？", category: .growth, keywords: ["节奏", "质量"]),
+        .init(question: "最近哪个反馈最值得认真对待？", category: .growth, keywords: ["反馈", "改进"]),
+        .init(question: "今天有什么可以明天少做一点？", category: .growth, keywords: ["减负", "效率"]),
+        .init(question: "你正在形成的一个好习惯是什么？", category: .growth, keywords: ["习惯", "积累"]),
+        .init(question: "今天有什么事让你更了解自己？", category: .growth, keywords: ["自我理解", "觉察"]),
+        .init(question: "你想为未来的自己留下哪条经验？", category: .growth, keywords: ["经验", "沉淀"]),
+        .init(question: "今天的注意力花在哪里最值得？", category: .growth, keywords: ["注意力", "价值"]),
+        .init(question: "你可以把哪个复杂问题拆小一点？", category: .growth, keywords: ["拆解", "行动"]),
+        .init(question: "什么事情正在慢慢变容易？", category: .growth, keywords: ["变化", "成长"]),
+        .init(question: "明天只推进一件事，你会选什么？", category: .growth, keywords: ["明日计划", "聚焦"]),
+        .init(question: "今天哪个瞬间让你感觉开心？", category: .emotion, keywords: ["开心", "瞬间"]),
+        .init(question: "最近有什么事情值得感谢？", category: .emotion, keywords: ["感谢", "关系"]),
+        .init(question: "今天有什么情绪想被你看见？", category: .emotion, keywords: ["情绪", "觉察"]),
+        .init(question: "哪个瞬间让你松了一口气？", category: .emotion, keywords: ["放松", "瞬间"]),
+        .init(question: "今天有没有一个小小的被照顾感？", category: .emotion, keywords: ["照顾", "温暖"]),
+        .init(question: "如果给今天的情绪取名，它叫什么？", category: .emotion, keywords: ["命名", "情绪"]),
+        .init(question: "今天的你最需要哪一句话？", category: .emotion, keywords: ["自我陪伴", "语言"]),
+        .init(question: "有什么担心可以先轻轻放下？", category: .emotion, keywords: ["担心", "放下"]),
+        .init(question: "今天身体哪里最需要休息？", category: .emotion, keywords: ["身体", "休息"]),
+        .init(question: "你今天对谁产生了善意？", category: .emotion, keywords: ["善意", "关系"]),
+        .init(question: "今天有什么事情让你感到安全？", category: .emotion, keywords: ["安全感", "稳定"]),
+        .init(question: "一个微小的满足来自哪里？", category: .emotion, keywords: ["满足", "生活"]),
+        .init(question: "今天你愿意原谅自己的哪一点？", category: .emotion, keywords: ["原谅", "自我接纳"]),
+        .init(question: "最近有什么让你反复想起？", category: .emotion, keywords: ["反复", "线索"]),
+        .init(question: "今天的心像什么天气？", category: .emotion, keywords: ["隐喻", "心情"]),
+        .init(question: "你可以怎样更温柔地结束今天？", category: .emotion, keywords: ["结束", "温柔"]),
+        .init(question: "今天哪个关系让你感到被支持？", category: .emotion, keywords: ["支持", "关系"]),
+        .init(question: "有什么快乐很小，但真实存在？", category: .emotion, keywords: ["快乐", "真实"]),
+        .init(question: "今天的压力主要来自哪里？", category: .emotion, keywords: ["压力", "来源"]),
+        .init(question: "此刻最想对自己说什么？", category: .emotion, keywords: ["自我对话", "此刻"]),
+        .init(question: "如果没有限制，你最想创造什么？", category: .creativity, keywords: ["创造", "想象"]),
+        .init(question: "今天出现过一个奇怪但有趣的想法吗？", category: .creativity, keywords: ["创意", "有趣"]),
+        .init(question: "如果把两个不相关的东西组合，会得到什么？", category: .creativity, keywords: ["组合", "联想"]),
+        .init(question: "你想为哪类人做一个小发明？", category: .creativity, keywords: ["发明", "人群"]),
+        .init(question: "一个普通物品可以被重新定义成什么？", category: .creativity, keywords: ["再定义", "物品"]),
+        .init(question: "如果今天是一张海报，标题是什么？", category: .creativity, keywords: ["海报", "表达"]),
+        .init(question: "有什么故事可以从今天的一个细节开始？", category: .creativity, keywords: ["故事", "细节"]),
+        .init(question: "你想把哪种感受做成一个产品？", category: .creativity, keywords: ["感受", "产品想象"]),
+        .init(question: "如果用声音表达今天，会是什么声音？", category: .creativity, keywords: ["声音", "感官"]),
+        .init(question: "一个不可能的想法里，有什么可能的部分？", category: .creativity, keywords: ["可能性", "拆解"]),
+        .init(question: "你想设计一个怎样的安静空间？", category: .creativity, keywords: ["空间", "安静"]),
+        .init(question: "如果给未来写一封信，第一句是什么？", category: .creativity, keywords: ["未来", "写作"]),
+        .init(question: "今天的一个问题可以被怎样诗意地解决？", category: .creativity, keywords: ["诗意", "解决"]),
+        .init(question: "你想让一个旧习惯变成什么新仪式？", category: .creativity, keywords: ["仪式", "习惯"]),
+        .init(question: "有什么想法值得先画一个粗糙草图？", category: .creativity, keywords: ["草图", "想法"]),
+        .init(question: "如果只用三种元素做一个作品，会选什么？", category: .creativity, keywords: ["元素", "作品"]),
+        .init(question: "你想创造一个什么样的早晨？", category: .creativity, keywords: ["早晨", "生活设计"]),
+        .init(question: "哪个梦或片段可以继续发展？", category: .creativity, keywords: ["梦", "片段"]),
+        .init(question: "如果把今天送给别人，你会包装成什么？", category: .creativity, keywords: ["礼物", "表达"]),
+        .init(question: "你想给世界增加一点什么温柔的东西？", category: .creativity, keywords: ["温柔", "创造"])
+    ]
+}
+
+struct LocalDailyQuestionProvider: DailyQuestionProvider {
+    var repository = DailyQuestionRepository()
+    var calendar = Calendar.current
+
+    func getQuestion(for date: Date) -> DailyQuestion {
+        let day = calendar.startOfDay(for: date)
+        let offset = calendar.dateComponents([.day], from: Date(timeIntervalSince1970: 0), to: day).day ?? 0
+        let template = repository.template(at: abs(offset))
+        return DailyQuestion(
+            date: day,
+            question: template.question,
+            category: template.category,
+            keywords: template.keywords,
+            createdAt: day
+        )
+    }
+}
+
+struct DailyQuestionService {
+    private let provider: DailyQuestionProvider
+    private let userDefaults: UserDefaults
+    private let calendar: Calendar
+    private let storageKey = "lingqi.mac.daily.questions"
+    private let draftPrefix = "lingqi.mac.daily.question.draft."
+
+    init(provider: DailyQuestionProvider = LocalDailyQuestionProvider(), userDefaults: UserDefaults = .standard, calendar: Calendar = .current) {
+        self.provider = provider
+        self.userDefaults = userDefaults
+        self.calendar = calendar
+    }
+
+    func question(for date: Date = Date()) -> DailyQuestion {
+        let day = calendar.startOfDay(for: date)
+        if let saved = loadQuestions().first(where: { calendar.isDate($0.date, inSameDayAs: day) }) {
+            return saved
+        }
+        return provider.getQuestion(for: day)
+    }
+
+    @discardableResult
+    func saveAnswer(_ text: String, for date: Date = Date()) -> DailyQuestion {
+        var question = self.question(for: date)
+        question.answer = String(text.prefix(500))
+        question.answeredAt = Date()
+        var questions = loadQuestions()
+        questions.removeAll { calendar.isDate($0.date, inSameDayAs: question.date) }
+        questions.append(question)
+        saveQuestions(questions.sorted { $0.date > $1.date })
+        clearDraft(for: date)
+        return question
+    }
+
+    func saveDraft(_ text: String, for date: Date = Date()) {
+        userDefaults.set(String(text.prefix(500)), forKey: draftKey(for: date))
+    }
+
+    func draft(for date: Date = Date()) -> String {
+        userDefaults.string(forKey: draftKey(for: date)) ?? ""
+    }
+
+    func answeredQuestions() -> [DailyQuestion] {
+        loadQuestions().filter { !($0.answer ?? "").isEmpty }.sorted { $0.date > $1.date }
+    }
+
+    private func clearDraft(for date: Date) {
+        userDefaults.removeObject(forKey: draftKey(for: date))
+    }
+
+    private func draftKey(for date: Date) -> String {
+        "\(draftPrefix)\(DateKey.string(from: calendar.startOfDay(for: date)))"
+    }
+
+    private func loadQuestions() -> [DailyQuestion] {
+        guard let data = userDefaults.data(forKey: storageKey),
+              let questions = try? JSONDecoder().decode([DailyQuestion].self, from: data)
+        else { return [] }
+        return questions
+    }
+
+    private func saveQuestions(_ questions: [DailyQuestion]) {
+        guard let data = try? JSONEncoder().encode(questions) else { return }
+        userDefaults.set(data, forKey: storageKey)
     }
 }
 
@@ -2491,6 +2754,14 @@ struct MenuBarQuickPanel: View {
     }
 }
 
+enum QuickPanelLayout {
+    static let width: CGFloat = 392
+    static let height: CGFloat = 680
+    static let horizontalPadding: CGFloat = 18
+    static let verticalPadding: CGFloat = 14
+    static let pinnedHeaderHeight: CGFloat = 58
+}
+
 enum InspirationGrowthStage: String, Codable, CaseIterable {
     case empty
     case seed
@@ -2550,35 +2821,43 @@ struct MenuBarQuickPanelView: View {
                     pulse: logoPulse,
                     onRefresh: refreshWeather
                 )
-                QuickDateWeatherBar()
-                QuickInspirationInputView(
-                    text: $inspirationDraft,
-                    isFocused: $isInputFocused
-                )
-                InspirationStatusHintView(
-                    text: statusHintText,
-                    symbol: statusHintSymbol,
-                    feedback: saveFeedback
-                )
-                PrimaryActionArea(
-                    canSave: canSave,
-                    didSave: didSave,
-                    isSaving: isSaving,
-                    onSave: saveInspiration,
-                    onOpen: { openMainWindow(route: .today) }
-                )
-                QuickActionGridView { route in
-                    openMainWindow(route: route)
+                .frame(height: QuickPanelLayout.pinnedHeaderHeight)
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        QuickDateWeatherBar()
+                        QuickInspirationInputView(
+                            text: $inspirationDraft,
+                            isFocused: $isInputFocused
+                        )
+                        InspirationStatusHintView(
+                            text: statusHintText,
+                            symbol: statusHintSymbol,
+                            feedback: saveFeedback
+                        )
+                        PrimaryActionArea(
+                            canSave: canSave,
+                            didSave: didSave,
+                            isSaving: isSaving,
+                            onSave: saveInspiration,
+                            onOpen: { openMainWindow(route: .today) }
+                        )
+                        QuickActionGridView { route in
+                            openMainWindow(route: route)
+                        }
+                        RecentInspirationListView(
+                            items: recentInspirations,
+                            onViewAll: { openMainWindow(route: .history) },
+                            onOpenItem: { _ in openMainWindow(route: .history) }
+                        )
+                        FooterBrandSloganView()
+                    }
+                    .padding(.bottom, QuickPanelLayout.verticalPadding)
                 }
-                RecentInspirationListView(
-                    items: recentInspirations,
-                    onViewAll: { openMainWindow(route: .history) },
-                    onOpenItem: { _ in openMainWindow(route: .history) }
-                )
-                FooterBrandSloganView()
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
+            .padding(.horizontal, QuickPanelLayout.horizontalPadding)
+            .padding(.top, QuickPanelLayout.verticalPadding)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             if let saveFeedback {
                 EmotionalToast(message: saveFeedback)
@@ -2587,7 +2866,7 @@ struct MenuBarQuickPanelView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .frame(width: 392, height: 592)
+        .frame(width: QuickPanelLayout.width, height: QuickPanelLayout.height, alignment: .topLeading)
         .onAppear {
             inspirationDraft = String(savedDraft.prefix(quickInspirationCharacterLimit))
             if weatherStore.info == nil {
@@ -3102,6 +3381,7 @@ struct QuickActionGridView: View {
 
     private var items: [(QuickPanelRoute, String, String)] {
         [
+            (.dailyInspiration, "今日启发", "sparkles"),
             (.summary, "今日总结", theme.symbol(.note)),
             (.history, "历史胶囊", "archivebox"),
             (.theme, "主题", "paintpalette"),
@@ -3301,7 +3581,7 @@ struct ContentView: View {
     private func handleQuickPanelRoute(_ route: QuickPanelRoute) {
         selectedDate = Date()
         switch route {
-        case .today:
+        case .today, .dailyInspiration:
             showingHistory = false
             showingKnowledgeBase = false
         case .summary:
@@ -3887,6 +4167,7 @@ struct MoodNote: View {
 private struct KnowledgeEntryOverride: Codable {
     let categoryRawValue: String
     let keywords: [String]
+    var statusRawValue: String?
 }
 
 private struct KnowledgeMonthFilter: Identifiable, Equatable {
@@ -3973,6 +4254,7 @@ struct KnowledgeBaseView: View {
     @State private var selectedCategory: KnowledgeCategory?
     @State private var selectedMonth: KnowledgeMonthFilter?
     @State private var selectedMood: String?
+    @State private var selectedStatus: KnowledgeStatus?
     @State private var selectedTimeRange: KnowledgeQuickTimeRange = .all
     @State private var selectedTrendGranularity: KnowledgeTrendGranularity = .month
     @State private var knowledgeEntries: [KnowledgeEntry] = []
@@ -3994,12 +4276,23 @@ struct KnowledgeBaseView: View {
             category: selectedCategory,
             month: selectedMonth?.date,
             timeRange: selectedTimeRange.range(),
-            mood: selectedMood
+            mood: selectedMood,
+            status: selectedStatus
         )
     }
 
     private var filteredEntries: [KnowledgeEntry] {
         KnowledgeBaseService.search(entries, filter: activeFilter)
+    }
+
+    private var publishedKnowledgeFilter: KnowledgeSearchFilter {
+        var filter = activeFilter
+        filter.status = .published
+        return filter
+    }
+
+    private var publishedFilteredEntries: [KnowledgeEntry] {
+        KnowledgeBaseService.search(entries, filter: publishedKnowledgeFilter)
     }
 
     private var profile: KnowledgeProfile {
@@ -4069,6 +4362,7 @@ struct KnowledgeBaseView: View {
             || selectedCategory != nil
             || selectedMonth != nil
             || selectedMood != nil
+            || selectedStatus != nil
             || selectedTimeRange != .all
     }
 
@@ -4079,14 +4373,18 @@ struct KnowledgeBaseView: View {
                 if let detailEntry {
                     KnowledgeDetailPanel(entry: detailEntry, compact: compact) {
                         self.detailEntry = nil
-                    } saveEdits: { category, keywords in
-                        saveEntryEdits(entry: detailEntry, category: category, keywords: keywords)
+                    } saveEdits: { category, keywords, status in
+                        saveEntryEdits(entry: detailEntry, category: category, keywords: keywords, status: status)
                     } openSource: {
                         selectedDate = detailEntry.date
                         showingKnowledgeBase = false
                     }
                 } else {
-                    cognitiveHomePanel
+                    if profile.totalEntries > 0 {
+                        cognitiveHomePanel
+                    } else {
+                        inboxHint
+                    }
                     searchPanel
                     if filteredEntries.isEmpty {
                         emptyState
@@ -4122,6 +4420,7 @@ struct KnowledgeBaseView: View {
         .onChange(of: selectedCategory) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedMonth) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedMood) { _ in refreshKnowledgeDerivedState() }
+        .onChange(of: selectedStatus) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedTimeRange) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedTrendGranularity) { _ in refreshKnowledgeDerivedState() }
     }
@@ -4151,11 +4450,11 @@ struct KnowledgeBaseView: View {
     }
 
     private func refreshKnowledgeDerivedState(allEntries: [KnowledgeEntry]) {
-        let visibleEntries = KnowledgeBaseService.search(allEntries, filter: activeFilter)
-        profileSnapshot = KnowledgeBaseService.profile(from: visibleEntries)
-        trendPoints = KnowledgeBaseService.trend(from: allEntries, filter: activeFilter, granularity: selectedTrendGranularity)
-        categoryShares = KnowledgeBaseService.categoryShares(from: allEntries, filter: activeFilter)
-        keywordNetwork = KnowledgeBaseService.keywordNetwork(from: allEntries, filter: activeFilter)
+        let visiblePublishedEntries = KnowledgeBaseService.search(allEntries, filter: publishedKnowledgeFilter)
+        profileSnapshot = KnowledgeBaseService.profile(from: visiblePublishedEntries)
+        trendPoints = KnowledgeBaseService.trend(from: allEntries, filter: publishedKnowledgeFilter, granularity: selectedTrendGranularity)
+        categoryShares = KnowledgeBaseService.categoryShares(from: allEntries, filter: publishedKnowledgeFilter)
+        keywordNetwork = KnowledgeBaseService.keywordNetwork(from: allEntries, filter: publishedKnowledgeFilter)
     }
 
     private func applyOverride(to entry: KnowledgeEntry) -> KnowledgeEntry {
@@ -4163,12 +4462,21 @@ struct KnowledgeBaseView: View {
               let category = KnowledgeCategory(rawValue: override.categoryRawValue) else {
             return entry
         }
-        return KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: override.keywords)
+        let edited = KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: override.keywords)
+        let status = KnowledgeStatus(rawValue: override.statusRawValue ?? "") ?? .published
+        return KnowledgeBaseService.applyStatus(to: edited, status: status)
     }
 
-    private func saveEntryEdits(entry: KnowledgeEntry, category: KnowledgeCategory, keywords: [String]) {
-        let edited = KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: keywords)
-        entryOverrides[entry.id.uuidString] = KnowledgeEntryOverride(categoryRawValue: edited.category.rawValue, keywords: edited.keywords)
+    private func saveEntryEdits(entry: KnowledgeEntry, category: KnowledgeCategory, keywords: [String], status: KnowledgeStatus) {
+        let edited = KnowledgeBaseService.applyStatus(
+            to: KnowledgeBaseService.applyEdits(to: entry, category: category, keywords: keywords),
+            status: status
+        )
+        entryOverrides[entry.id.uuidString] = KnowledgeEntryOverride(
+            categoryRawValue: edited.category.rawValue,
+            keywords: edited.keywords,
+            statusRawValue: edited.status.rawValue
+        )
         persistOverrides()
         knowledgeEntries = knowledgeEntries.map { $0.id == edited.id ? edited : $0 }
         refreshKnowledgeDerivedState()
@@ -4242,6 +4550,28 @@ struct KnowledgeBaseView: View {
         }
     }
 
+    private var inboxHint: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "tray.full.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(theme.palette.accent)
+                .frame(width: 44, height: 44)
+                .background(theme.palette.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            VStack(alignment: .leading, spacing: 5) {
+                Text("先从待沉淀内容中确认结论")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                Text("打开一条历史灵感，补充分类和标签后选择“已沉淀”。发布后才会进入搜索、导出和洞察。")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(compact ? 14 : 16)
+        .glassPanel(radius: 20)
+    }
+
     private var profilePanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: compact ? 10 : 12) {
@@ -4304,6 +4634,19 @@ struct KnowledgeBaseView: View {
                         let count = profile.categoryCounts[category, default: 0]
                         KnowledgeCategoryChip(title: "\(category.title) \(count)", isSelected: selectedCategory == category) {
                             selectedCategory = category
+                        }
+                    }
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    KnowledgeCategoryChip(title: "全部状态", isSelected: selectedStatus == nil) {
+                        selectedStatus = nil
+                    }
+                    ForEach(KnowledgeStatus.allCases) { status in
+                        KnowledgeCategoryChip(title: status.title, isSelected: selectedStatus == status) {
+                            selectedStatus = selectedStatus == status ? nil : status
                         }
                     }
                 }
@@ -4384,7 +4727,7 @@ struct KnowledgeBaseView: View {
                     .noWrap(scale: 0.72)
             }
             .buttonStyle(SecondaryButtonStyle())
-            .disabled(filteredEntries.isEmpty)
+            .disabled(publishedFilteredEntries.isEmpty)
             Button {
                 exportBatchPDF()
             } label: {
@@ -4393,7 +4736,7 @@ struct KnowledgeBaseView: View {
                     .noWrap(scale: 0.72)
             }
             .buttonStyle(SecondaryButtonStyle())
-            .disabled(filteredEntries.isEmpty)
+            .disabled(publishedFilteredEntries.isEmpty)
         }
         .padding(compact ? 14 : 16)
         .glassPanel(radius: 20)
@@ -4403,17 +4746,17 @@ struct KnowledgeBaseView: View {
         var parts = [selectedCategory?.title ?? "全部分类", selectedMonth?.title ?? "全部月份"]
         if selectedTimeRange != .all { parts.append(selectedTimeRange.title) }
         if let selectedMood { parts.append("心情 \(selectedMood)") }
-        parts.append("\(filteredEntries.count) 条知识")
+        parts.append("\(publishedFilteredEntries.count) 条已沉淀知识")
         return parts.joined(separator: " · ")
     }
 
     private func exportBatchWord() {
-        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: activeFilter, includeProfile: true)
+        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: publishedKnowledgeFilter, includeProfile: true)
         NoteExporter.exportKnowledgeDocx(bundle: bundle)
     }
 
     private func exportBatchPDF() {
-        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: activeFilter, includeProfile: true)
+        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: publishedKnowledgeFilter, includeProfile: true)
         NoteExporter.exportKnowledgePDF(bundle: bundle)
     }
 
@@ -4438,6 +4781,7 @@ struct KnowledgeBaseView: View {
         selectedCategory = nil
         selectedMonth = nil
         selectedMood = nil
+        selectedStatus = nil
         selectedTimeRange = .all
     }
 
@@ -4449,7 +4793,7 @@ struct KnowledgeBaseView: View {
             Text(entries.isEmpty ? "还没有可沉淀的知识" : "没有匹配的知识条目")
                 .font(.system(size: 18, weight: .bold, design: .rounded))
                 .foregroundStyle(theme.palette.text)
-            Text(entries.isEmpty ? "继续记录今日胶囊，知识库会自动从历史灵感中归纳。" : "换一个关键词或清空分类筛选再试。")
+            Text(entries.isEmpty ? "继续记录今日胶囊，再从候选内容中确认值得复用的结论。" : "换一个关键词或清空分类筛选再试。")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(theme.palette.muted)
                 .multilineTextAlignment(.center)
@@ -4965,10 +5309,10 @@ private struct KnowledgeFeedSection: View {
         KnowledgeSectionShell(compact: compact) {
             HStack(alignment: .lastTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("知识流")
+                    Text("知识收件箱")
                         .font(.system(size: compact ? 20 : 22, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.palette.text)
-                    Text("沉淀后的可复用条目")
+                    Text("待沉淀候选与已确认的可复用条目")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(theme.palette.muted)
                 }
@@ -5021,7 +5365,7 @@ private struct KnowledgeFeedCard: View {
                             .font(.system(size: compact ? 14 : 15, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.palette.text)
                             .lineLimit(1)
-                        Text("\(dateText(entry.date)) · \(entry.category.title) · \(entry.mood)")
+                        Text("\(entry.status.title) · \(dateText(entry.date)) · \(entry.category.title) · \(entry.mood)")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(theme.palette.muted.opacity(0.78))
                             .lineLimit(1)
@@ -5031,7 +5375,9 @@ private struct KnowledgeFeedCard: View {
 
                     if isHovering {
                         HStack(spacing: 6) {
-                            feedAction("复用", "doc.on.doc", reuse)
+                            if entry.status == .published {
+                                feedAction("复用", "doc.on.doc", reuse)
+                            }
                             feedAction("编辑", "slider.horizontal.3", edit)
                             feedAction("查看", "arrow.up.right", view)
                         }
@@ -5539,16 +5885,17 @@ struct KnowledgeDetailPanel: View {
     let entry: KnowledgeEntry
     let compact: Bool
     let back: () -> Void
-    let saveEdits: (KnowledgeCategory, [String]) -> Void
+    let saveEdits: (KnowledgeCategory, [String], KnowledgeStatus) -> Void
     let openSource: () -> Void
     @State private var selectedCategory: KnowledgeCategory
+    @State private var selectedStatus: KnowledgeStatus
     @State private var tagText: String
 
     init(
         entry: KnowledgeEntry,
         compact: Bool,
         back: @escaping () -> Void,
-        saveEdits: @escaping (KnowledgeCategory, [String]) -> Void,
+        saveEdits: @escaping (KnowledgeCategory, [String], KnowledgeStatus) -> Void,
         openSource: @escaping () -> Void
     ) {
         self.entry = entry
@@ -5557,6 +5904,7 @@ struct KnowledgeDetailPanel: View {
         self.saveEdits = saveEdits
         self.openSource = openSource
         _selectedCategory = State(initialValue: entry.category)
+        _selectedStatus = State(initialValue: entry.status)
         _tagText = State(initialValue: entry.keywords.joined(separator: "、"))
     }
 
@@ -5596,9 +5944,9 @@ struct KnowledgeDetailPanel: View {
                     }
                     Spacer()
                     Button {
-                        saveEdits(selectedCategory, editedTags)
+                        saveEdits(selectedCategory, editedTags, selectedStatus)
                     } label: {
-                        Label("保存调整", systemImage: "checkmark.circle")
+                        Label(selectedStatus == .published ? "发布知识" : "保存调整", systemImage: "checkmark.circle")
                             .font(.system(size: 12, weight: .bold))
                             .noWrap(scale: 0.7)
                     }
@@ -5622,6 +5970,20 @@ struct KnowledgeDetailPanel: View {
                         Picker("", selection: $selectedCategory) {
                             ForEach(KnowledgeCategory.allCases) { category in
                                 Label(category.title, systemImage: category.symbol).tag(category)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("沉淀状态", systemImage: "tray")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(theme.palette.muted)
+                        Picker("", selection: $selectedStatus) {
+                            ForEach(KnowledgeStatus.allCases) { status in
+                                Text(status.title).tag(status)
                             }
                         }
                         .labelsHidden()
@@ -6001,9 +6363,12 @@ struct DailyCapsule: Identifiable, Equatable {
     let reminders: [ReminderItem]
     let completedCount: Int
     let status: CapsuleStatus
+    let dailyQuestion: DailyQuestion?
 
     var hasContent: Bool {
-        !noteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !reminders.isEmpty
+        !noteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !reminders.isEmpty
+            || dailyQuestion?.answer?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
     var completionText: String {
@@ -6049,6 +6414,8 @@ enum DailyCapsuleService {
         let note = noteStore.note(for: date)
         let reminders = reminderStore.items(on: date)
         let analysis = InspirationAnalyzer.analyze(note)
+        let dailyQuestion = DailyQuestionService().question(for: date)
+        let answeredQuestion = dailyQuestion.answer?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? dailyQuestion : nil
         let completed = reminders.filter { $0.isDone }.count
         let weatherText: String
         if Calendar.current.isDateInToday(date), let weatherInfo {
@@ -6069,14 +6436,16 @@ enum DailyCapsuleService {
             weatherText: weatherText,
             reminders: reminders,
             completedCount: completed,
-            status: status
+            status: status,
+            dailyQuestion: answeredQuestion
         )
     }
 
     static func historyCapsules(noteStore: NoteStore, reminderStore: ReminderStore, weatherInfo: WeatherInfo?) -> [DailyCapsule] {
         let noteDates = noteStore.noteDates
         let reminderDates = reminderStore.items.map(\.date)
-        let keys = Set((noteDates + reminderDates).map { DateKey.string(from: $0) })
+        let questionDates = DailyQuestionService().answeredQuestions().map(\.date)
+        let keys = Set((noteDates + reminderDates + questionDates).map { DateKey.string(from: $0) })
         return keys
             .compactMap { DateKey.date(from: $0) }
             .sorted(by: >)
@@ -7338,6 +7707,10 @@ struct DayDetail: View {
                     showToast("今日总结已刷新。")
                 }
 
+                DailyInspirationPromptCard(selectedDate: selectedDate, compact: compact) { message in
+                    showToast(message)
+                }
+
                 TodayActionPanel(
                     items: store.items(on: selectedDate),
                     compact: compact,
@@ -7500,28 +7873,61 @@ struct WeatherMiniPill: View {
 
 enum InspirationTextFormat: CaseIterable {
     case heading
+    case bold
+    case italic
     case bullet
     case numbered
+    case checklist
     case quote
+    case code
+    case link
+    case mention
     case divider
+    case expand
 
     var title: String {
         switch self {
         case .heading: return "标题"
+        case .bold: return "加粗"
+        case .italic: return "斜体"
         case .bullet: return "要点"
         case .numbered: return "编号"
+        case .checklist: return "待办"
         case .quote: return "引用"
+        case .code: return "代码"
+        case .link: return "链接"
+        case .mention: return "提及"
         case .divider: return "分隔"
+        case .expand: return "展开"
         }
     }
 
     var symbol: String {
         switch self {
         case .heading: return "textformat.size"
+        case .bold: return "bold"
+        case .italic: return "italic"
         case .bullet: return "list.bullet"
         case .numbered: return "list.number"
+        case .checklist: return "checklist"
         case .quote: return "quote.opening"
+        case .code: return "chevron.left.forwardslash.chevron.right"
+        case .link: return "link"
+        case .mention: return "at"
         case .divider: return "minus"
+        case .expand: return "arrow.up.left.and.arrow.down.right"
+        }
+    }
+}
+
+enum InspirationEditorMode: String, CaseIterable {
+    case write
+    case preview
+
+    var title: String {
+        switch self {
+        case .write: return "写"
+        case .preview: return "预览"
         }
     }
 }
@@ -7529,52 +7935,80 @@ enum InspirationTextFormat: CaseIterable {
 struct InspirationFormatToolbar: View {
     @Environment(\.appTheme) private var theme
     let compact: Bool
+    @Binding var mode: InspirationEditorMode
+    let canUndo: Bool
     let onSelect: (InspirationTextFormat) -> Void
+    let onAttachFile: () -> Void
+    let onUndo: () -> Void
     let onExportWord: (() -> Void)?
     let onExportPDF: (() -> Void)?
     let exportDisabled: Bool
 
     init(
         compact: Bool,
+        mode: Binding<InspirationEditorMode>,
+        canUndo: Bool,
         exportDisabled: Bool = true,
         onExportWord: (() -> Void)? = nil,
         onExportPDF: (() -> Void)? = nil,
+        onAttachFile: @escaping () -> Void,
+        onUndo: @escaping () -> Void,
         onSelect: @escaping (InspirationTextFormat) -> Void
     ) {
         self.compact = compact
+        self._mode = mode
+        self.canUndo = canUndo
         self.exportDisabled = exportDisabled
         self.onExportWord = onExportWord
         self.onExportPDF = onExportPDF
+        self.onAttachFile = onAttachFile
+        self.onUndo = onUndo
         self.onSelect = onSelect
     }
 
     var body: some View {
-        HStack(spacing: compact ? 6 : 8) {
-            ForEach(InspirationTextFormat.allCases, id: \.self) { format in
-                Button {
-                    onSelect(format)
-                } label: {
-                    Label(format.title, systemImage: format.symbol)
-                        .font(.system(size: compact ? 10 : 11, weight: .bold))
-                        .labelStyle(.titleAndIcon)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .frame(minWidth: compact ? 48 : 58, minHeight: 30)
+        VStack(spacing: compact ? 7 : 8) {
+            HStack(spacing: compact ? 6 : 8) {
+                HStack(spacing: 4) {
+                    ForEach(InspirationEditorMode.allCases, id: \.self) { item in
+                        Button {
+                            mode = item
+                        } label: {
+                            Text(item.title)
+                                .font(.system(size: compact ? 10 : 11, weight: .bold, design: .rounded))
+                                .foregroundStyle(mode == item ? theme.palette.ink.opacity(0.88) : theme.palette.text.opacity(0.78))
+                                .frame(width: compact ? 38 : 44, height: 28)
+                                .background(mode == item ? theme.palette.accent.opacity(0.86) : Color.clear, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .focusable(false)
+                        .help(item.title)
+                    }
                 }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .foregroundStyle(theme.palette.text.opacity(0.88))
-                .background(theme.palette.cardStrong.opacity(0.64), in: Capsule())
-                .overlay(Capsule().stroke(theme.palette.line.opacity(0.9), lineWidth: 1))
-                .hoverLift()
+                .padding(3)
+                .background(theme.palette.cardStrong.opacity(0.52), in: Capsule())
+                .overlay(Capsule().stroke(theme.palette.line.opacity(0.72), lineWidth: 1))
+
+                Spacer(minLength: 0)
+                if let onExportWord, let onExportPDF {
+                    HStack(spacing: compact ? 6 : 8) {
+                        ToolbarExportButton(title: compact ? "Word" : "导出 Word", fileType: "W", compact: compact, disabled: exportDisabled, action: onExportWord)
+                        ToolbarExportButton(title: compact ? "PDF" : "导出 PDF", fileType: "P", compact: compact, disabled: exportDisabled, action: onExportPDF)
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                }
             }
-            Spacer(minLength: 0)
-            if let onExportWord, let onExportPDF {
-                HStack(spacing: compact ? 6 : 8) {
-                    ToolbarExportButton(title: compact ? "Word" : "导出 Word", fileType: "W", compact: compact, disabled: exportDisabled, action: onExportWord)
-                    ToolbarExportButton(title: compact ? "PDF" : "导出 PDF", fileType: "P", compact: compact, disabled: exportDisabled, action: onExportPDF)
+
+            HStack(spacing: compact ? 5 : 7) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: compact ? 5 : 7) {
+                        ForEach(InspirationTextFormat.allCases, id: \.self) { format in
+                            formatButton(format)
+                        }
+                        toolbarButton(title: "附件", symbol: "paperclip", disabled: mode == .preview, action: onAttachFile)
+                        toolbarButton(title: "撤销", symbol: "arrow.uturn.backward", disabled: !canUndo, action: onUndo)
+                    }
                 }
-                .fixedSize(horizontal: true, vertical: false)
             }
         }
         .padding(.horizontal, 10)
@@ -7584,6 +8018,31 @@ struct InspirationFormatToolbar: View {
             RoundedRectangle(cornerRadius: 17, style: .continuous)
                 .stroke(theme.palette.line.opacity(0.68), lineWidth: 1)
         )
+    }
+
+    private func formatButton(_ format: InspirationTextFormat) -> some View {
+        toolbarButton(title: format.title, symbol: format.symbol, disabled: mode == .preview) {
+            onSelect(format)
+        }
+    }
+
+    private func toolbarButton(title: String, symbol: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: compact ? 10 : 11, weight: .bold))
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .frame(minWidth: compact ? 46 : 56, minHeight: 30)
+                .foregroundStyle(disabled ? theme.palette.muted.opacity(0.42) : theme.palette.text.opacity(0.88))
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .disabled(disabled)
+        .background(theme.palette.cardStrong.opacity(disabled ? 0.30 : 0.64), in: Capsule())
+        .overlay(Capsule().stroke(theme.palette.line.opacity(disabled ? 0.42 : 0.9), lineWidth: 1))
+        .hoverLift(!disabled)
+        .help(title)
     }
 }
 
@@ -7645,6 +8104,9 @@ struct TodayCapsuleHeroCard: View {
     let onCopy: () -> Void
     let onRefreshSummary: () -> Void
     @State private var draft = ""
+    @State private var editorMode: InspirationEditorMode = .write
+    @State private var isEditorExpanded = false
+    @State private var draftHistory: [String] = []
     @State private var analysis = InspirationAnalyzer.analyze("")
     @State private var analysisWorkItem: DispatchWorkItem?
 
@@ -7688,27 +8150,38 @@ struct TodayCapsuleHeroCard: View {
             VStack(spacing: 8) {
                 InspirationFormatToolbar(
                     compact: compact,
+                    mode: $editorMode,
+                    canUndo: !draftHistory.isEmpty,
                     exportDisabled: exportedNoteText.isEmpty,
                     onExportWord: exportWord,
-                    onExportPDF: exportPDF
+                    onExportPDF: exportPDF,
+                    onAttachFile: attachFile,
+                    onUndo: undoDraft
                 ) { format in
                     applyFormat(format)
                 }
 
-                ZStack(alignment: .topLeading) {
-                    if draft.isEmpty {
-                        Text("写下今天闪过的一个想法……")
-                            .font(.system(size: compact ? 12 : 13, weight: .medium))
-                            .foregroundStyle(theme.palette.muted.opacity(0.62))
-                            .padding(.top, 8)
+                Group {
+                    if editorMode == .write {
+                        ZStack(alignment: .topLeading) {
+                            if draft.isEmpty {
+                                Text("写下今天闪过的一个想法……")
+                                    .font(.system(size: compact ? 12 : 13, weight: .medium))
+                                    .foregroundStyle(theme.palette.muted.opacity(0.62))
+                                    .padding(.top, 8)
+                            }
+                            TextEditor(text: $draft)
+                                .font(.system(size: compact ? 12 : 13))
+                                .foregroundStyle(theme.palette.text)
+                                .scrollContentBackground(.hidden)
+                                .background(Color.clear)
+                                .frame(minHeight: editorHeight)
+                                .onChange(of: draft) { updateDraft($0) }
+                        }
+                    } else {
+                        InspirationMarkdownPreview(text: draft, compact: compact)
+                            .frame(minHeight: editorHeight, alignment: .topLeading)
                     }
-                    TextEditor(text: $draft)
-                        .font(.system(size: compact ? 12 : 13))
-                        .foregroundStyle(theme.palette.text)
-                        .scrollContentBackground(.hidden)
-                        .background(Color.clear)
-                        .frame(minHeight: compact ? 96 : 112)
-                        .onChange(of: draft) { updateDraft($0) }
                 }
                 .padding(.horizontal, 6)
                 .padding(.bottom, 2)
@@ -7787,6 +8260,13 @@ struct TodayCapsuleHeroCard: View {
         draft.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var editorHeight: CGFloat {
+        if isEditorExpanded {
+            return compact ? 180 : 220
+        }
+        return compact ? 96 : 112
+    }
+
     private func updateDraft(_ value: String) {
         let limited = String(value.prefix(inspirationCharacterLimit))
         if limited != value {
@@ -7803,23 +8283,84 @@ struct TodayCapsuleHeroCard: View {
     }
 
     private func applyFormat(_ format: InspirationTextFormat) {
-        var insertion = ""
+        if format == .expand {
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                isEditorExpanded.toggle()
+            }
+            return
+        }
+
+        let insertion: String
         let needsLeadingBreak = !draft.isEmpty && !draft.hasSuffix("\n")
 
         switch format {
         case .heading:
             insertion = "\(needsLeadingBreak ? "\n" : "")## "
+        case .bold:
+            insertion = "**加粗文本**"
+        case .italic:
+            insertion = "*斜体文本*"
         case .bullet:
             insertion = "\(needsLeadingBreak ? "\n" : "")- "
         case .numbered:
             insertion = "\(needsLeadingBreak ? "\n" : "")1. "
+        case .checklist:
+            insertion = "\(needsLeadingBreak ? "\n" : "")- [ ] "
         case .quote:
             insertion = "\(needsLeadingBreak ? "\n" : "")> "
+        case .code:
+            insertion = "`代码`"
+        case .link:
+            insertion = "[链接文本](https://)"
+        case .mention:
+            insertion = "@"
         case .divider:
             insertion = "\(needsLeadingBreak ? "\n" : "")---\n"
+        case .expand:
+            insertion = ""
         }
 
+        insertMarkdown(insertion)
+    }
+
+    private func insertMarkdown(_ insertion: String) {
+        guard !insertion.isEmpty else { return }
+        pushDraftHistory()
         draft = String((draft + insertion).prefix(inspirationCharacterLimit))
+        persistDraftAndAnalyze()
+    }
+
+    private func attachFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.prompt = "添加"
+        guard panel.runModal() == .OK else { return }
+        let links = panel.urls.map { url in
+            "[\(url.lastPathComponent)](\(url.path))"
+        }
+        guard !links.isEmpty else { return }
+        let needsLeadingBreak = !draft.isEmpty && !draft.hasSuffix("\n")
+        insertMarkdown("\(needsLeadingBreak ? "\n" : "")\(links.joined(separator: "\n"))\n")
+    }
+
+    private func undoDraft() {
+        guard let previous = draftHistory.popLast() else { return }
+        draft = previous
+        persistDraftAndAnalyze()
+    }
+
+    private func pushDraftHistory() {
+        if draftHistory.last != draft {
+            draftHistory.append(draft)
+        }
+        if draftHistory.count > 12 {
+            draftHistory.removeFirst(draftHistory.count - 12)
+        }
+    }
+
+    private func persistDraftAndAnalyze() {
         noteStore.setNote(draft, for: selectedDate)
         analysisWorkItem?.cancel()
         let work = DispatchWorkItem {
@@ -7841,6 +8382,36 @@ struct TodayCapsuleHeroCard: View {
         guard !text.isEmpty else { return }
         noteStore.flushSave()
         NoteExporter.exportPDF(note: text, date: selectedDate)
+    }
+}
+
+struct InspirationMarkdownPreview: View {
+    @Environment(\.appTheme) private var theme
+    let text: String
+    let compact: Bool
+
+    var body: some View {
+        ScrollView {
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("预览会显示 Markdown 格式后的内容。")
+                    .font(.system(size: compact ? 12 : 13, weight: .medium))
+                    .foregroundStyle(theme.palette.muted.opacity(0.62))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            } else {
+                Text(renderedText)
+                    .font(.system(size: compact ? 12 : 13))
+                    .foregroundStyle(theme.palette.text.opacity(0.92))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(.top, 8)
+            }
+        }
+        .scrollContentBackground(.hidden)
+    }
+
+    private var renderedText: AttributedString {
+        (try? AttributedString(markdown: text, options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
     }
 }
 
@@ -7937,6 +8508,240 @@ struct FlowPillRow: View {
                 .overlay(Capsule().stroke(theme.palette.line, lineWidth: 1))
             }
         }
+    }
+}
+
+struct DailyInspirationPromptCard: View {
+    @EnvironmentObject private var noteStore: NoteStore
+    @Environment(\.appTheme) private var theme
+    let selectedDate: Date
+    let compact: Bool
+    let onSaved: (String) -> Void
+    @State private var question: DailyQuestion?
+    @State private var draft = ""
+    @State private var isEditorFocused = false
+    @State private var hasAnswered = false
+    @State private var isGrowing = false
+    private let service = DailyQuestionService()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 13 : 16) {
+            HStack(alignment: .center, spacing: 14) {
+                DailyInspirationSeedFeedback(isGrowing: isGrowing, hasAnswered: hasAnswered, compact: compact)
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("今日启发", systemImage: "sparkles")
+                        .font(.system(size: compact ? 17 : 19, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    Text(statusText)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(hasAnswered ? theme.palette.accent : theme.palette.muted)
+                }
+                Spacer()
+                if let question {
+                    Text(question.category.title)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(theme.palette.accent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(theme.palette.accent.opacity(0.12), in: Capsule())
+                        .overlay(Capsule().stroke(theme.palette.accent.opacity(0.24), lineWidth: 1))
+                }
+            }
+
+            if let question {
+                Text("“\(question.question)”")
+                    .font(.system(size: compact ? 18 : 21, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(theme.palette.ink.opacity(isEditorFocused ? 0.26 : 0.18))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                .stroke(isEditorFocused ? theme.palette.accent.opacity(0.52) : theme.palette.line, lineWidth: 1)
+                        )
+                    if draft.isEmpty {
+                        Text("写下你的想法……")
+                            .font(.system(size: compact ? 12 : 13, weight: .medium))
+                            .foregroundStyle(theme.palette.muted.opacity(0.66))
+                            .padding(.horizontal, 14)
+                            .padding(.top, 13)
+                    }
+                    TextEditor(text: Binding(
+                        get: { draft },
+                        set: { updateDraft($0) }
+                    ))
+                    .font(.system(size: compact ? 12 : 13))
+                    .foregroundStyle(theme.palette.text)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.clear)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 5)
+                    .padding(.bottom, 24)
+                    .frame(minHeight: compact ? 96 : 118)
+                    .onTapGesture { isEditorFocused = true }
+
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Text("\(draft.count) / 500")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(draft.count >= 500 ? theme.palette.warm : theme.palette.muted)
+                                .padding(.trailing, 13)
+                                .padding(.bottom, 9)
+                        }
+                    }
+                }
+
+                HStack {
+                    FlowPillRow(items: question.keywords, fallback: [question.category.title])
+                    Spacer()
+                    if hasAnswered {
+                        Label(answerTimeText(question), systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(theme.palette.accent)
+                    } else {
+                        Button(action: saveAnswer) {
+                            Label(canSave ? "保存回答" : "开始思考", systemImage: canSave ? "tray.and.arrow.down.fill" : "pencil")
+                                .font(.system(size: 12, weight: .bold))
+                                .noWrap()
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+                        .disabled(!canSave)
+                        .opacity(canSave ? 1 : 0.45)
+                        .frame(width: compact ? 120 : 136)
+                    }
+                }
+            }
+        }
+        .padding(compact ? 18 : 22)
+        .glassPanel(radius: 24, active: hasAnswered || !draft.isEmpty)
+        .hoverLift()
+        .onAppear(perform: loadQuestion)
+        .onChange(of: selectedDate) { _ in loadQuestion() }
+    }
+
+    private var canSave: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasAnswered
+    }
+
+    private var statusText: String {
+        if hasAnswered { return "今日启发已完成" }
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "今天的问题正在等待你的回答。" }
+        return "正在记录你的想法"
+    }
+
+    private func loadQuestion() {
+        let loaded = service.question(for: selectedDate)
+        question = loaded
+        draft = loaded.answer ?? service.draft(for: selectedDate)
+        hasAnswered = loaded.answer?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private func updateDraft(_ value: String) {
+        let limited = String(value.prefix(500))
+        if limited != value {
+            draft = limited
+            return
+        }
+        draft = limited
+        service.saveDraft(limited, for: selectedDate)
+    }
+
+    private func saveAnswer() {
+        guard let question else { return }
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let saved = service.saveAnswer(trimmed, for: selectedDate)
+        noteStore.appendDailyInspiration(question: saved, answer: trimmed, for: selectedDate)
+        noteStore.flushSave()
+        self.question = saved
+        hasAnswered = true
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.80)) {
+            isGrowing = true
+        }
+        onSaved("灵感种子已吸收")
+        NotificationCenter.default.post(name: .dailyQuestionAnswered, object: question.id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            withAnimation(.easeOut(duration: 0.22)) {
+                isGrowing = false
+            }
+        }
+    }
+
+    private func answerTimeText(_ question: DailyQuestion) -> String {
+        guard let answeredAt = question.answeredAt else { return "已保存" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "HH:mm"
+        return "回答于 \(formatter.string(from: answeredAt))"
+    }
+}
+
+struct DailyInspirationSeedFeedback: View {
+    @Environment(\.appTheme) private var theme
+    let isGrowing: Bool
+    let hasAnswered: Bool
+    let compact: Bool
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<6, id: \.self) { index in
+                Circle()
+                    .fill(theme.palette.accent.opacity(isGrowing ? 0.30 : 0))
+                    .frame(width: 5, height: 5)
+                    .offset(y: isGrowing ? -30 : -10)
+                    .rotationEffect(.degrees(Double(index) * 60))
+                    .scaleEffect(isGrowing ? 1.15 : 0.55)
+            }
+            Image(systemName: hasAnswered ? "leaf.circle.fill" : "leaf")
+                .font(.system(size: compact ? 24 : 28, weight: .semibold))
+                .foregroundStyle(theme.palette.accent)
+                .frame(width: compact ? 48 : 56, height: compact ? 48 : 56)
+                .background(theme.palette.accent.opacity(0.12), in: Circle())
+                .overlay(Circle().stroke(theme.palette.accent.opacity(hasAnswered ? 0.48 : 0.22), lineWidth: 1))
+                .shadow(color: theme.palette.accent.opacity(isGrowing ? 0.55 : 0.18), radius: isGrowing ? 18 : 8)
+                .scaleEffect(isGrowing ? 1.10 : 1)
+        }
+        .frame(width: compact ? 54 : 64, height: compact ? 54 : 64)
+    }
+}
+
+struct DailyQuestionHistoryBlock: View {
+    @Environment(\.appTheme) private var theme
+    let question: DailyQuestion
+    let compact: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("Daily Inspiration", systemImage: "sparkles")
+                    .font(.system(size: compact ? 13 : 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.palette.text)
+                Spacer()
+                Text(DateKey.string(from: question.date))
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(theme.palette.muted)
+            }
+            Text("今日启发：\(question.question)")
+                .font(.system(size: compact ? 12 : 13, weight: .semibold))
+                .foregroundStyle(theme.palette.text)
+                .fixedSize(horizontal: false, vertical: true)
+            if let answer = question.answer, !answer.isEmpty {
+                Text("我的回答：\(answer)")
+                    .font(.system(size: compact ? 12 : 13, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            FlowPillRow(items: question.keywords, fallback: [question.category.title])
+        }
+        .padding(compact ? 13 : 16)
+        .background(theme.palette.card.opacity(0.56), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(theme.palette.line, lineWidth: 1))
     }
 }
 
@@ -8334,6 +9139,12 @@ struct CapsuleHistoryCard: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(theme.palette.text)
                         .lineLimit(2)
+                    if let question = capsule.dailyQuestion {
+                        Label(question.question, systemImage: "sparkles")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(theme.palette.accent)
+                            .lineLimit(1)
+                    }
                     FlowPillRow(items: capsule.keywords, fallback: [capsule.mood])
                 }
                 .layoutPriority(1)
@@ -8384,6 +9195,10 @@ struct CapsuleDetailPanel: View {
             SummaryCard(capsule: capsule, compact: compact) {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(capsule.summary, forType: .string)
+            }
+
+            if let question = capsule.dailyQuestion {
+                DailyQuestionHistoryBlock(question: question, compact: compact)
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -8558,16 +9373,31 @@ struct NotebookPanel: View {
         switch format {
         case .heading:
             insertion = "\(needsLeadingBreak ? "\n" : "")## "
+        case .bold:
+            insertion = "**加粗文本**"
+        case .italic:
+            insertion = "*斜体文本*"
         case .bullet:
             insertion = "\(needsLeadingBreak ? "\n" : "")- "
         case .numbered:
             insertion = "\(needsLeadingBreak ? "\n" : "")1. "
+        case .checklist:
+            insertion = "\(needsLeadingBreak ? "\n" : "")- [ ] "
         case .quote:
             insertion = "\(needsLeadingBreak ? "\n" : "")> "
+        case .code:
+            insertion = "`代码`"
+        case .link:
+            insertion = "[链接文本](https://)"
+        case .mention:
+            insertion = "@"
         case .divider:
             insertion = "\(needsLeadingBreak ? "\n" : "")---\n"
+        case .expand:
+            insertion = ""
         }
 
+        guard !insertion.isEmpty else { return }
         draft = String((draft + insertion).prefix(inspirationCharacterLimit))
         noteStore.setNote(draft, for: selectedDate)
         scheduleAnalysis(for: draft)
