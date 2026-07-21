@@ -4,6 +4,7 @@ import SwiftUI
 struct QuickPanelLayoutTests {
     static func main() {
         testPanelProvidesRoomForPinnedHeaderAndScrollableBody()
+        testQuickActionsUseAStableMultiColumnLayout()
         testScrollableBodyHasPositiveHeightBelowPinnedHeader()
         print("QuickPanelLayoutTests passed")
     }
@@ -18,5 +19,10 @@ struct QuickPanelLayoutTests {
     private static func testScrollableBodyHasPositiveHeightBelowPinnedHeader() {
         let bodyHeight = QuickPanelLayout.height - QuickPanelLayout.pinnedHeaderHeight - QuickPanelLayout.verticalPadding * 2 - 8
         assert(bodyHeight > 0, "expected a positive scrollable body height")
+    }
+
+    private static func testQuickActionsUseAStableMultiColumnLayout() {
+        assert(QuickPanelLayout.quickActionColumns == 3, "expected five quick actions to avoid a singleton second row")
+        assert(QuickPanelLayout.quickActionMinimumHeight >= 52, "expected quick action tiles to keep a usable hit target")
     }
 }

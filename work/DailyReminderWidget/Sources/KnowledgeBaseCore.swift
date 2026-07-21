@@ -189,6 +189,19 @@ struct KnowledgeKeywordNode: Identifiable, Equatable {
     let count: Int
 }
 
+enum KnowledgeWordCloudTier: Int, Equatable {
+    case primary
+    case secondary
+    case tertiary
+}
+
+struct KnowledgeWordCloudItem: Identifiable, Equatable {
+    var id: String { keyword }
+    let keyword: String
+    let count: Int
+    let tier: KnowledgeWordCloudTier
+}
+
 struct KnowledgeKeywordEdge: Identifiable, Equatable {
     var id: String { "\(left)|\(right)" }
     let left: String
@@ -301,9 +314,12 @@ enum KnowledgeBaseService {
     }
 
     static func trend(from entries: [KnowledgeEntry], filter: KnowledgeSearchFilter, granularity: KnowledgeTrendGranularity) -> [KnowledgeTrendPoint] {
-        let filtered = search(entries, filter: filter)
+        trend(from: search(entries, filter: filter), granularity: granularity)
+    }
+
+    static func trend(from entries: [KnowledgeEntry], granularity: KnowledgeTrendGranularity) -> [KnowledgeTrendPoint] {
         let calendar = Calendar.current
-        let grouped = Dictionary(grouping: filtered) { entry in
+        let grouped = Dictionary(grouping: entries) { entry in
             bucketStart(for: entry.date, granularity: granularity, calendar: calendar)
         }
         return grouped.keys.sorted().map { start in
@@ -318,15 +334,18 @@ enum KnowledgeBaseService {
     }
 
     static func categoryShares(from entries: [KnowledgeEntry], filter: KnowledgeSearchFilter) -> [KnowledgeCategoryShare] {
-        let filtered = search(entries, filter: filter)
-        guard !filtered.isEmpty else { return [] }
-        let grouped = Dictionary(grouping: filtered, by: \.category)
+        categoryShares(from: search(entries, filter: filter))
+    }
+
+    static func categoryShares(from entries: [KnowledgeEntry]) -> [KnowledgeCategoryShare] {
+        guard !entries.isEmpty else { return [] }
+        let grouped = Dictionary(grouping: entries, by: \.category)
         return grouped.map { category, categoryEntries in
             KnowledgeCategoryShare(
                 category: category,
                 entryCount: categoryEntries.count,
                 wordCount: categoryEntries.reduce(0) { $0 + $1.wordCount },
-                ratio: Double(categoryEntries.count) / Double(filtered.count)
+                ratio: Double(categoryEntries.count) / Double(entries.count)
             )
         }
         .sorted {
@@ -341,8 +360,15 @@ enum KnowledgeBaseService {
         maxNodes: Int = 12,
         maxEdges: Int = 18
     ) -> KnowledgeKeywordNetwork {
-        let filtered = search(entries, filter: filter)
-        let keywordCounts = filtered
+        keywordNetwork(from: search(entries, filter: filter), maxNodes: maxNodes, maxEdges: maxEdges)
+    }
+
+    static func keywordNetwork(
+        from entries: [KnowledgeEntry],
+        maxNodes: Int = 12,
+        maxEdges: Int = 18
+    ) -> KnowledgeKeywordNetwork {
+        let keywordCounts = entries
             .flatMap(\.keywords)
             .reduce(into: [String: Int]()) { partial, keyword in
                 partial[keyword, default: 0] += 1
@@ -358,7 +384,7 @@ enum KnowledgeBaseService {
 
         let retained = Set(nodes.map(\.keyword))
         var edgeCounts: [String: (left: String, right: String, weight: Int)] = [:]
-        for entry in filtered {
+        for entry in entries {
             let keywords = Array(Set(entry.keywords.filter { retained.contains($0) })).sorted()
             guard keywords.count >= 2 else { continue }
             for leftIndex in 0..<(keywords.count - 1) {
@@ -384,6 +410,45 @@ enum KnowledgeBaseService {
             .prefix(maxEdges)
 
         return KnowledgeKeywordNetwork(nodes: nodes, edges: Array(edges))
+    }
+
+    static func wordCloud(from entries: [KnowledgeEntry], limit: Int = 14) -> [KnowledgeWordCloudItem] {
+        guard limit > 0 else { return [] }
+
+        var statistics: [String: (count: Int, latestDate: Date)] = [:]
+        for entry in entries {
+            for keyword in entry.keywords {
+                let normalized = normalizeCloudKeyword(keyword)
+                guard normalized.count >= 2 else { continue }
+
+                var value = statistics[normalized] ?? (count: 0, latestDate: entry.date)
+                value.count += 1
+                value.latestDate = max(value.latestDate, entry.date)
+                statistics[normalized] = value
+            }
+        }
+
+        let sorted = statistics
+            .map { (keyword: $0.key, count: $0.value.count, latestDate: $0.value.latestDate) }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count > rhs.count }
+                if lhs.latestDate != rhs.latestDate { return lhs.latestDate > rhs.latestDate }
+                return lhs.keyword.localizedStandardCompare(rhs.keyword) == .orderedAscending
+            }
+            .prefix(limit)
+
+        return sorted.enumerated().map { index, item in
+            let tier: KnowledgeWordCloudTier
+            switch index {
+            case 0:
+                tier = .primary
+            case 1...3:
+                tier = .secondary
+            default:
+                tier = .tertiary
+            }
+            return KnowledgeWordCloudItem(keyword: item.keyword, count: item.count, tier: tier)
+        }
     }
 
     static func applyEdits(to entry: KnowledgeEntry, category: KnowledgeCategory, keywords: [String]) -> KnowledgeEntry {
@@ -587,6 +652,13 @@ enum KnowledgeBaseService {
         var result = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         result = result.replacingOccurrences(of: #"^[0-9一二三四五六七八九十]+[\.、\)]"#, with: "", options: .regularExpression)
         return result.trimmingCharacters(in: CharacterSet(charactersIn: "：:，,。.!！?？、；;（）()【】[]《》<>“”\"' "))
+    }
+
+    private static func normalizeCloudKeyword(_ keyword: String) -> String {
+        keyword
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private static func monthDisplayText(_ date: Date) -> String {

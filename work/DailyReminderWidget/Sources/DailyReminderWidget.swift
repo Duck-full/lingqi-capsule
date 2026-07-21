@@ -173,12 +173,38 @@ final class WindowRenderState: ObservableObject {
 
     @Published private(set) var isLightweightMode = false
     private var restoreWorkItem: DispatchWorkItem?
+    private var isMiniaturized = false
+    private var isApplicationInactive = false
+    private var notificationObservers: [NSObjectProtocol] = []
 
-    private init() {}
+    private init() {
+        let center = NotificationCenter.default
+        notificationObservers = [
+            center.addObserver(
+                forName: NSApplication.didResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.updateApplicationActivity(isInactive: true)
+            },
+            center.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.updateApplicationActivity(isInactive: false)
+            }
+        ]
+    }
+
+    deinit {
+        notificationObservers.forEach(NotificationCenter.default.removeObserver)
+    }
 
     func prepareForMiniaturize(window: NSWindow?) {
         restoreWorkItem?.cancel()
-        isLightweightMode = true
+        isMiniaturized = true
+        updateLightweightMode(animated: false)
         PerformanceDiagnostics.record("window.miniaturize-prepare", milliseconds: 0)
         window?.contentView?.needsDisplay = true
         window?.contentView?.displayIfNeeded()
@@ -187,13 +213,32 @@ final class WindowRenderState: ObservableObject {
     func finishDeminiaturize() {
         PerformanceDiagnostics.record("window.deminiaturize-finished", milliseconds: 0)
         restoreWorkItem?.cancel()
+        isMiniaturized = false
         let work = DispatchWorkItem { [weak self] in
-            withAnimation(.easeOut(duration: 0.16)) {
-                self?.isLightweightMode = false
-            }
+            self?.updateLightweightMode(animated: true)
         }
         restoreWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    private func updateApplicationActivity(isInactive: Bool) {
+        isApplicationInactive = isInactive
+        if isInactive {
+            restoreWorkItem?.cancel()
+        }
+        updateLightweightMode(animated: !isInactive)
+    }
+
+    private func updateLightweightMode(animated: Bool) {
+        let shouldUseLightweightMode = isMiniaturized || isApplicationInactive
+        guard shouldUseLightweightMode != isLightweightMode else { return }
+        if animated {
+            withAnimation(.easeOut(duration: 0.16)) {
+                isLightweightMode = shouldUseLightweightMode
+            }
+        } else {
+            isLightweightMode = shouldUseLightweightMode
+        }
     }
 }
 
@@ -1771,7 +1816,7 @@ final class NotificationScheduler: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        await MainActor.run {
+        _ = await MainActor.run {
             MainWindowPresenter.present(route: .today)
         }
     }
@@ -1925,6 +1970,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
     case auroraMint
     case sunsetSynth
     case deepOcean
+    case sanyaCoast
     case roseNebula
     case graphiteLaser
 
@@ -1945,6 +1991,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case .auroraMint: return "极光薄荷"
         case .sunsetSynth: return "落日合成"
         case .deepOcean: return "深海蓝焰"
+        case .sanyaCoast: return "三亚海滨"
         case .roseNebula: return "玫瑰星云"
         case .graphiteLaser: return "石墨激光"
         }
@@ -1965,6 +2012,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case .auroraMint: return "极光"
         case .sunsetSynth: return "落日"
         case .deepOcean: return "深海"
+        case .sanyaCoast: return "三亚"
         case .roseNebula: return "星云"
         case .graphiteLaser: return "石墨"
         }
@@ -1985,6 +2033,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case .auroraMint: return "给今天一点清透感，先完成一个小动作。"
         case .sunsetSynth: return "别急着把一天填满，留一点余温给自己。"
         case .deepOcean: return "安静也是效率，深呼吸后再开始。"
+        case .sanyaCoast: return "让海风把节奏放慢，把今天的清亮留在这一页。"
         case .roseNebula: return "把重要的事温柔地放到眼前。"
         case .graphiteLaser: return "清晰、克制、精准，今天就这样推进。"
         }
@@ -2005,6 +2054,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case .auroraMint: return "drop.fill"
         case .sunsetSynth: return "sunset.fill"
         case .deepOcean: return "water.waves"
+        case .sanyaCoast: return "sun.max.fill"
         case .roseNebula: return "heart.circle.fill"
         case .graphiteLaser: return "scope"
         }
@@ -2025,6 +2075,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case .auroraMint: return "保持清透呼吸"
         case .sunsetSynth: return "给节奏一点余温"
         case .deepOcean: return "沉稳推进"
+        case .sanyaCoast: return "把海风留在今天"
         case .roseNebula: return "温柔提醒重要事"
         case .graphiteLaser: return "克制而精准"
         }
@@ -2175,6 +2226,17 @@ enum AppTheme: String, CaseIterable, Identifiable {
                 accent2: Color(red: 0.16, green: 0.40, blue: 1.0),
                 warm: Color(red: 0.39, green: 0.93, blue: 1.0)
             )
+        case .sanyaCoast:
+            return ThemePalette(
+                ink: Color(red: 0.02, green: 0.15, blue: 0.20),
+                plum: Color(red: 0.03, green: 0.28, blue: 0.33),
+                surface: Color(red: 0.07, green: 0.37, blue: 0.45),
+                glowA: Color(red: 0.18, green: 0.84, blue: 0.78),
+                glowB: Color(red: 0.28, green: 0.64, blue: 0.92),
+                accent: Color(red: 0.21, green: 0.89, blue: 0.76),
+                accent2: Color(red: 0.27, green: 0.60, blue: 0.95),
+                warm: Color(red: 0.98, green: 0.74, blue: 0.42)
+            )
         case .roseNebula:
             return ThemePalette(
                 ink: Color(red: 0.15, green: 0.03, blue: 0.16),
@@ -2204,6 +2266,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
         switch self {
         case .ios27Glass: return .liquidGlass
         case .immersiveVista: return .immersiveScene
+        case .sanyaCoast: return .sanyaCoast
         case .weatherChild: return .animeWeather
         case .yourName: return .animeStars
         case .demonBlade: return .animeBlade
@@ -2271,6 +2334,12 @@ enum AppTheme: String, CaseIterable, Identifiable {
         case (.ancientInk, .notification): return "bell"
         case (.ancientInk, .task): return "checklist"
         case (.ancientInk, .mood): return "sun.max"
+        case (.sanyaCoast, .theme): return "sun.max"
+        case (.sanyaCoast, .calendar): return "calendar"
+        case (.sanyaCoast, .note): return "water.waves"
+        case (.sanyaCoast, .notification): return "bell.badge"
+        case (.sanyaCoast, .task): return "checklist"
+        case (.sanyaCoast, .mood): return "sun.max.fill"
         default:
             switch role {
             case .theme: return "wand.and.stars"
@@ -2288,6 +2357,7 @@ enum ThemeBackgroundStyle {
     case neon
     case liquidGlass
     case immersiveScene
+    case sanyaCoast
     case animeWeather
     case animeStars
     case animeBlade
@@ -2508,9 +2578,12 @@ struct AnimatedGlowBackground: View {
 
     var body: some View {
         let reducedEffects = reduceMotion || PerformanceTuning.prefersReducedEffects || lightweightRendering
+        let animationPhase = reducedEffects ? false : animate
         ZStack {
             if theme.backgroundStyle == .immersiveScene {
                 immersiveSceneBackground(reducedEffects: reducedEffects)
+            } else if theme.backgroundStyle == .sanyaCoast {
+                sanyaCoastBackground(reducedEffects: reducedEffects)
             } else {
                 LinearGradient(
                     colors: [theme.palette.ink, theme.palette.plum, theme.palette.surface],
@@ -2521,26 +2594,85 @@ struct AnimatedGlowBackground: View {
                     .fill(theme.palette.glowA.opacity(reducedEffects ? 0.16 : 0.24))
                     .frame(width: reducedEffects ? 440 : 520, height: reducedEffects ? 440 : 520)
                     .blur(radius: reducedEffects ? 48 : 70)
-                    .offset(x: animate ? 360 : 280, y: animate ? -250 : -170)
+                    .offset(x: animationPhase ? 360 : 280, y: animationPhase ? -250 : -170)
                 Circle()
                     .fill(theme.palette.glowB.opacity(reducedEffects ? 0.15 : 0.23))
                     .frame(width: reducedEffects ? 500 : 620, height: reducedEffects ? 500 : 620)
                     .blur(radius: reducedEffects ? 56 : 86)
-                    .offset(x: animate ? -360 : -260, y: animate ? 330 : 250)
+                    .offset(x: animationPhase ? -360 : -260, y: animationPhase ? 330 : 250)
                 LinearGradient(
                     colors: [theme.palette.warm.opacity(reducedEffects ? 0.08 : 0.12), .clear, theme.palette.accent2.opacity(reducedEffects ? 0.08 : 0.12)],
-                    startPoint: animate ? .bottomTrailing : .bottomLeading,
+                    startPoint: animationPhase ? .bottomTrailing : .bottomLeading,
                     endPoint: .topTrailing
                 )
-                ThemeBackgroundIllustration(theme: theme, animate: reducedEffects ? false : animate)
-                themeDecoration(reducedEffects: reducedEffects)
+                ThemeBackgroundIllustration(theme: theme, animate: animationPhase)
+                themeDecoration(reducedEffects: reducedEffects, animationPhase: animationPhase)
             }
         }
         .ignoresSafeArea()
-        .onAppear {
-            guard !reducedEffects, theme.backgroundStyle != .immersiveScene else { return }
-            withAnimation(.easeInOut(duration: 5.5).repeatForever(autoreverses: true)) {
-                animate.toggle()
+        .onAppear { syncAnimation(reducedEffects: reducedEffects) }
+        .onChange(of: reducedEffects) { syncAnimation(reducedEffects: $0) }
+        .onChange(of: theme.backgroundStyle) { _ in syncAnimation(reducedEffects: reducedEffects) }
+    }
+
+    @ViewBuilder
+    private func sanyaCoastBackground(reducedEffects: Bool) -> some View {
+        GeometryReader { proxy in
+            ZStack {
+                LinearGradient(
+                    colors: [theme.palette.ink, theme.palette.plum, theme.palette.surface],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+
+                LinearGradient(
+                    colors: [Color.white.opacity(0.07), .clear, theme.palette.ink.opacity(0.28)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+
+                Ellipse()
+                    .fill(theme.palette.warm.opacity(reducedEffects ? 0.10 : 0.16))
+                    .frame(width: proxy.size.width * 0.72, height: max(160, proxy.size.height * 0.18))
+                    .blur(radius: reducedEffects ? 24 : 44)
+                    .offset(x: proxy.size.width * 0.22, y: -proxy.size.height * 0.32)
+
+                SanyaWaveBand(amplitude: 0.16, phase: 0.10)
+                    .fill(
+                        LinearGradient(
+                            colors: [theme.palette.accent2.opacity(0.24), theme.palette.surface.opacity(0.10)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: proxy.size.width * 1.18, height: proxy.size.height * 0.46)
+                    .offset(x: reducedEffects ? -proxy.size.width * 0.05 : (animate ? proxy.size.width * 0.03 : -proxy.size.width * 0.05), y: proxy.size.height * 0.30)
+
+                SanyaWaveBand(amplitude: 0.11, phase: 0.72)
+                    .fill(
+                        LinearGradient(
+                            colors: [theme.palette.glowA.opacity(0.21), theme.palette.plum.opacity(0.08)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: proxy.size.width * 1.12, height: proxy.size.height * 0.40)
+                    .offset(x: reducedEffects ? proxy.size.width * 0.04 : (animate ? -proxy.size.width * 0.06 : proxy.size.width * 0.04), y: proxy.size.height * 0.39)
+
+                Image(systemName: "sun.max.fill")
+                    .font(.system(size: min(proxy.size.width * 0.18, 156), weight: .light))
+                    .foregroundStyle(theme.palette.warm.opacity(0.075))
+                    .offset(x: proxy.size.width * 0.31, y: -proxy.size.height * 0.31)
+
+                if !reducedEffects {
+                    ForEach(0..<4, id: \.self) { index in
+                        Capsule()
+                            .fill(Color.white.opacity(0.055))
+                            .frame(width: CGFloat(120 + index * 56), height: 1)
+                            .rotationEffect(.degrees(-7))
+                            .offset(x: CGFloat(index * 180 - 300), y: CGFloat(index * 74 - 110))
+                    }
+                }
             }
         }
     }
@@ -2560,7 +2692,7 @@ struct AnimatedGlowBackground: View {
                 }
 
                 Color.black.opacity(0.28)
-                if !lightweightRendering {
+                if !reducedEffects {
                     LinearGradient(
                         colors: [
                             Color.black.opacity(0.50),
@@ -2594,9 +2726,11 @@ struct AnimatedGlowBackground: View {
     }
 
     @ViewBuilder
-    private func themeDecoration(reducedEffects: Bool) -> some View {
+    private func themeDecoration(reducedEffects: Bool, animationPhase: Bool) -> some View {
         switch theme.backgroundStyle {
         case .immersiveScene:
+            EmptyView()
+        case .sanyaCoast:
             EmptyView()
         case .liquidGlass:
             ZStack {
@@ -2619,7 +2753,7 @@ struct AnimatedGlowBackground: View {
                         )
                         .frame(width: CGFloat(190 + index * 86), height: CGFloat(126 + index * 48))
                         .blur(radius: CGFloat(index % 2) * 0.8)
-                        .rotationEffect(.degrees(Double(index) * 10 + (animate ? 5 : -5)))
+                        .rotationEffect(.degrees(Double(index) * 10 + (animationPhase ? 5 : -5)))
                         .offset(x: CGFloat(index * 52 - 210), y: CGFloat(index * 28 - 120))
                 }
             }
@@ -2633,14 +2767,14 @@ struct AnimatedGlowBackground: View {
             }
             .rotationEffect(.degrees(-8))
             .scaleEffect(1.4)
-            .offset(y: animate ? 20 : -20)
+            .offset(y: animationPhase ? 20 : -20)
         case .cartoon:
             ZStack {
                 ForEach(0..<(reducedEffects ? 4 : 8), id: \.self) { index in
                     Circle()
                         .fill((index % 2 == 0 ? theme.palette.warm : theme.palette.accent2).opacity(0.13))
                         .frame(width: CGFloat(70 + index * 14), height: CGFloat(70 + index * 14))
-                        .offset(x: CGFloat((index % 4) * 150 - 260), y: CGFloat((index / 2) * 110 - 220) + (animate ? 16 : -16))
+                        .offset(x: CGFloat((index % 4) * 150 - 260), y: CGFloat((index / 2) * 110 - 220) + (animationPhase ? 16 : -16))
                 }
             }
         case .animeWeather:
@@ -2650,14 +2784,14 @@ struct AnimatedGlowBackground: View {
                     Image(systemName: index % 3 == 0 ? "cloud.fill" : "drop.fill")
                         .font(.system(size: CGFloat(index % 3 == 0 ? 54 : 20), weight: .semibold))
                         .foregroundStyle((index % 3 == 0 ? Color.white : theme.palette.accent).opacity(index % 3 == 0 ? 0.10 : 0.20))
-                        .offset(x: CGFloat(index * 128 - 450) + (animate ? 22 : -22), y: CGFloat((index % 4) * 92 - 210) + (animate ? -12 : 12))
+                        .offset(x: CGFloat(index * 128 - 450) + (animationPhase ? 22 : -22), y: CGFloat((index % 4) * 92 - 210) + (animationPhase ? -12 : 12))
                 }
                 ForEach(0..<(reducedEffects ? 2 : 5), id: \.self) { index in
                     Capsule()
                         .fill(theme.palette.accent.opacity(0.10))
                         .frame(width: 120, height: 2)
                         .rotationEffect(.degrees(-18))
-                        .offset(x: CGFloat(index * 170 - 360), y: CGFloat(index * 54 - 120) + (animate ? 24 : -24))
+                        .offset(x: CGFloat(index * 170 - 360), y: CGFloat(index * 54 - 120) + (animationPhase ? 24 : -24))
                 }
             }
         case .animeStars:
@@ -2666,15 +2800,15 @@ struct AnimatedGlowBackground: View {
                     Image(systemName: index % 4 == 0 ? "sparkle" : "star.fill")
                         .font(.system(size: CGFloat(10 + (index % 5) * 4), weight: .semibold))
                         .foregroundStyle((index % 3 == 0 ? theme.palette.warm : theme.palette.accent).opacity(0.18))
-                        .offset(x: CGFloat((index * 91) % 780 - 390), y: CGFloat((index * 57) % 520 - 260) + (animate ? 10 : -10))
-                        .scaleEffect(animate ? 1.10 : 0.86)
+                        .offset(x: CGFloat((index * 91) % 780 - 390), y: CGFloat((index * 57) % 520 - 260) + (animationPhase ? 10 : -10))
+                        .scaleEffect(animationPhase ? 1.10 : 0.86)
                 }
                 ForEach(0..<(reducedEffects ? 2 : 4), id: \.self) { index in
                     Capsule()
                         .fill(LinearGradient(colors: [.clear, theme.palette.warm.opacity(0.22), .clear], startPoint: .leading, endPoint: .trailing))
                         .frame(width: 260, height: 2)
                         .rotationEffect(.degrees(-28))
-                        .offset(x: CGFloat(index * 180 - 280) + (animate ? 28 : -28), y: CGFloat(index * 84 - 170))
+                        .offset(x: CGFloat(index * 180 - 280) + (animationPhase ? 28 : -28), y: CGFloat(index * 84 - 170))
                 }
             }
         case .animeBlade:
@@ -2684,13 +2818,13 @@ struct AnimatedGlowBackground: View {
                         .fill((index % 2 == 0 ? theme.palette.accent : theme.palette.accent2).opacity(0.12))
                         .frame(width: CGFloat(330 + index * 28), height: 8)
                         .rotationEffect(.degrees(index % 2 == 0 ? -34 : 32))
-                        .offset(x: CGFloat(index * 52 - 210), y: CGFloat(index * 62 - 220) + (animate ? 16 : -16))
+                        .offset(x: CGFloat(index * 52 - 210), y: CGFloat(index * 62 - 220) + (animationPhase ? 16 : -16))
                 }
                 ForEach(0..<(reducedEffects ? 2 : 5), id: \.self) { index in
                     Image(systemName: index % 2 == 0 ? "flame.fill" : "wind")
                         .font(.system(size: CGFloat(34 + index * 8), weight: .bold))
                         .foregroundStyle((index % 2 == 0 ? theme.palette.accent2 : theme.palette.accent).opacity(0.13))
-                        .rotationEffect(.degrees(animate ? 8 : -8))
+                        .rotationEffect(.degrees(animationPhase ? 8 : -8))
                         .offset(x: CGFloat(index * 145 - 280), y: CGFloat((index % 3) * 120 - 160))
                 }
             }
@@ -2701,14 +2835,14 @@ struct AnimatedGlowBackground: View {
                     Image(systemName: index % 4 == 0 ? "book.closed.fill" : "leaf.fill")
                         .font(.system(size: CGFloat(18 + (index % 5) * 8), weight: .semibold))
                         .foregroundStyle((index % 4 == 0 ? theme.palette.warm : theme.palette.accent).opacity(0.14))
-                        .rotationEffect(.degrees(Double(index * 23) + (animate ? 8 : -8)))
-                        .offset(x: CGFloat((index * 87) % 760 - 380), y: CGFloat((index * 69) % 520 - 260) + (animate ? 14 : -14))
+                        .rotationEffect(.degrees(Double(index * 23) + (animationPhase ? 8 : -8)))
+                        .offset(x: CGFloat((index * 87) % 760 - 380), y: CGFloat((index * 69) % 520 - 260) + (animationPhase ? 14 : -14))
                 }
                 ForEach(0..<(reducedEffects ? 2 : 4), id: \.self) { index in
                     RoundedRectangle(cornerRadius: 90, style: .continuous)
                         .stroke(theme.palette.warm.opacity(0.07), lineWidth: 1)
                         .frame(width: CGFloat(220 + index * 110), height: CGFloat(150 + index * 64))
-                        .rotationEffect(.degrees(Double(index * 11) + (animate ? 4 : -4)))
+                        .rotationEffect(.degrees(Double(index * 11) + (animationPhase ? 4 : -4)))
                 }
             }
         case .heritage:
@@ -2718,12 +2852,52 @@ struct AnimatedGlowBackground: View {
                     RoundedRectangle(cornerRadius: 80, style: .continuous)
                         .stroke(theme.palette.warm.opacity(0.06), lineWidth: 1)
                         .frame(width: CGFloat(260 + index * 120), height: CGFloat(170 + index * 88))
-                        .rotationEffect(.degrees(Double(index) * 8 + (animate ? 3 : -3)))
+                        .rotationEffect(.degrees(Double(index) * 8 + (animationPhase ? 3 : -3)))
                 }
             }
         case .neon:
             EmptyView()
         }
+    }
+
+    private func syncAnimation(reducedEffects: Bool) {
+        guard !reducedEffects, theme.backgroundStyle != .immersiveScene else {
+            if animate { animate = false }
+            return
+        }
+        guard !animate else { return }
+        withAnimation(.easeInOut(duration: 5.5).repeatForever(autoreverses: true)) {
+            animate = true
+        }
+    }
+}
+
+private struct SanyaWaveBand: Shape {
+    let amplitude: CGFloat
+    let phase: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let baseline = rect.height * (0.38 + phase * 0.10)
+        let wavelength = max(rect.width * 0.54, 220)
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: baseline))
+
+        var x: CGFloat = 0
+        while x < rect.width {
+            let endX = min(x + wavelength, rect.width)
+            let span = endX - x
+            path.addCurve(
+                to: CGPoint(x: endX, y: baseline),
+                control1: CGPoint(x: x + span * 0.28, y: baseline - rect.height * amplitude),
+                control2: CGPoint(x: x + span * 0.74, y: baseline + rect.height * amplitude * 0.72)
+            )
+            x = endX
+        }
+
+        path.addLine(to: CGPoint(x: rect.width, y: rect.height))
+        path.addLine(to: CGPoint(x: 0, y: rect.height))
+        path.closeSubpath()
+        return path
     }
 }
 
@@ -2760,6 +2934,8 @@ enum QuickPanelLayout {
     static let horizontalPadding: CGFloat = 18
     static let verticalPadding: CGFloat = 14
     static let pinnedHeaderHeight: CGFloat = 58
+    static let quickActionColumns = 3
+    static let quickActionMinimumHeight: CGFloat = 52
 }
 
 enum InspirationGrowthStage: String, Codable, CaseIterable {
@@ -2815,7 +2991,7 @@ struct MenuBarQuickPanelView: View {
     var body: some View {
         ZStack {
             QuickPanelBackground()
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 9) {
                 HeaderStatusView(
                     todayWordCount: todayWordCount,
                     pulse: logoPulse,
@@ -2824,7 +3000,7 @@ struct MenuBarQuickPanelView: View {
                 .frame(height: QuickPanelLayout.pinnedHeaderHeight)
 
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 9) {
                         QuickDateWeatherBar()
                         QuickInspirationInputView(
                             text: $inspirationDraft,
@@ -3094,19 +3270,12 @@ struct HeaderStatusView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(height: 58)
-        .background(
-            LinearGradient(
-                colors: [theme.palette.cardStrong.opacity(0.92), theme.palette.card.opacity(0.62)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-        )
+        .background(theme.palette.card.opacity(0.62), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(theme.palette.line.opacity(1.18), lineWidth: 1)
+                .stroke(theme.palette.line.opacity(0.92), lineWidth: 1)
         )
-        .shadow(color: theme.palette.accent.opacity(0.10), radius: 14, x: 0, y: 8)
+        .shadow(color: Color.black.opacity(0.10), radius: 10, x: 0, y: 6)
     }
 
     private var growthStage: InspirationGrowthStage {
@@ -3138,7 +3307,7 @@ struct QuickDateWeatherBar: View {
                     .minimumScaleFactor(0.78)
             }
             .padding(.horizontal, 12)
-            .frame(height: 44)
+            .frame(height: 40)
         }
     }
 
@@ -3166,7 +3335,7 @@ struct QuickInspirationInputView: View {
                 Text("写下刚刚闪过的一个想法…")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(QuickPanelStyle.weakText)
-                    .padding(.top, 16)
+                    .padding(.top, 14)
                     .padding(.leading, 16)
             }
             TextEditor(text: $text)
@@ -3175,7 +3344,7 @@ struct QuickInspirationInputView: View {
                 .scrollContentBackground(.hidden)
                 .background(Color.clear)
                 .padding(.horizontal, 12)
-                .padding(.top, 8)
+                .padding(.top, 6)
                 .padding(.bottom, 28)
                 .focused($editorFocused)
                 .onChange(of: text) { value in
@@ -3195,7 +3364,7 @@ struct QuickInspirationInputView: View {
             .padding(.bottom, 10)
             .frame(maxHeight: .infinity, alignment: .bottom)
         }
-        .frame(height: 120)
+        .frame(height: 124)
         .background(QuickPanelStyle.cardStrong, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -3240,12 +3409,12 @@ struct PrimaryActionArea: View {
                 .font(.system(size: 13, weight: .bold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.82)
-                .frame(maxWidth: .infinity, minHeight: 40)
+                .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(QuickPrimaryButtonStyle())
             .keyboardShortcut(.return, modifiers: .command)
             .disabled(!canSave || isSaving)
-            .opacity(canSave ? 1 : 0.46)
+            .opacity(canSave ? 1 : 0.40)
 
             Button(action: onOpen) {
                 HStack(spacing: 8) {
@@ -3255,7 +3424,7 @@ struct PrimaryActionArea: View {
                 .font(.system(size: 12, weight: .bold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.82)
-                .frame(maxWidth: .infinity, minHeight: 40)
+                .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(QuickSecondaryButtonStyle())
             .keyboardShortcut("o", modifiers: .command)
@@ -3370,7 +3539,10 @@ struct QuickActionGridView: View {
     let action: (QuickPanelRoute) -> Void
 
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 4), spacing: 7) {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: QuickPanelLayout.quickActionColumns),
+            spacing: 7
+        ) {
             ForEach(items, id: \.0.rawValue) { item in
                 QuickActionTile(title: item.1, systemImage: item.2) {
                     action(item.0)
@@ -3407,7 +3579,7 @@ struct QuickActionTile: View {
                     .foregroundStyle(QuickPanelStyle.subText)
                     .noWrap(scale: 0.72)
             }
-            .frame(maxWidth: .infinity, minHeight: 56)
+            .frame(maxWidth: .infinity, minHeight: QuickPanelLayout.quickActionMinimumHeight)
             .background(QuickPanelStyle.card.opacity(hovering ? 1.35 : 1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -4262,9 +4434,12 @@ struct KnowledgeBaseView: View {
     @State private var trendPoints: [KnowledgeTrendPoint] = []
     @State private var categoryShares: [KnowledgeCategoryShare] = []
     @State private var keywordNetwork = KnowledgeKeywordNetwork(nodes: [], edges: [])
+    @State private var wordCloudItems: [KnowledgeWordCloudItem] = []
     @State private var detailEntry: KnowledgeEntry?
     @State private var entryOverrides: [String: KnowledgeEntryOverride] = [:]
     @State private var hasLoadedKnowledgePage = false
+    @State private var pendingKnowledgeReload: DispatchWorkItem?
+    @State private var pendingDerivedRefresh: DispatchWorkItem?
 
     private var entries: [KnowledgeEntry] {
         knowledgeEntries
@@ -4411,18 +4586,22 @@ struct KnowledgeBaseView: View {
             }
         }
         .onReceive(noteStore.objectWillChange) { _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: reloadKnowledge)
+            scheduleKnowledgeReload()
         }
         .onReceive(reminderStore.objectWillChange) { _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: reloadKnowledge)
+            scheduleKnowledgeReload()
         }
-        .onChange(of: query) { _ in refreshKnowledgeDerivedState() }
+        .onChange(of: query) { _ in scheduleDerivedRefresh() }
         .onChange(of: selectedCategory) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedMonth) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedMood) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedStatus) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedTimeRange) { _ in refreshKnowledgeDerivedState() }
         .onChange(of: selectedTrendGranularity) { _ in refreshKnowledgeDerivedState() }
+        .onDisappear {
+            pendingKnowledgeReload?.cancel()
+            pendingDerivedRefresh?.cancel()
+        }
     }
 
     private func reloadKnowledge() {
@@ -4452,9 +4631,24 @@ struct KnowledgeBaseView: View {
     private func refreshKnowledgeDerivedState(allEntries: [KnowledgeEntry]) {
         let visiblePublishedEntries = KnowledgeBaseService.search(allEntries, filter: publishedKnowledgeFilter)
         profileSnapshot = KnowledgeBaseService.profile(from: visiblePublishedEntries)
-        trendPoints = KnowledgeBaseService.trend(from: allEntries, filter: publishedKnowledgeFilter, granularity: selectedTrendGranularity)
-        categoryShares = KnowledgeBaseService.categoryShares(from: allEntries, filter: publishedKnowledgeFilter)
-        keywordNetwork = KnowledgeBaseService.keywordNetwork(from: allEntries, filter: publishedKnowledgeFilter)
+        trendPoints = KnowledgeBaseService.trend(from: visiblePublishedEntries, granularity: selectedTrendGranularity)
+        categoryShares = KnowledgeBaseService.categoryShares(from: visiblePublishedEntries)
+        keywordNetwork = KnowledgeBaseService.keywordNetwork(from: visiblePublishedEntries)
+        wordCloudItems = KnowledgeBaseService.wordCloud(from: visiblePublishedEntries)
+    }
+
+    private func scheduleKnowledgeReload() {
+        pendingKnowledgeReload?.cancel()
+        let work = DispatchWorkItem { reloadKnowledge() }
+        pendingKnowledgeReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30, execute: work)
+    }
+
+    private func scheduleDerivedRefresh() {
+        pendingDerivedRefresh?.cancel()
+        let work = DispatchWorkItem { refreshKnowledgeDerivedState() }
+        pendingDerivedRefresh = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: work)
     }
 
     private func applyOverride(to entry: KnowledgeEntry) -> KnowledgeEntry {
@@ -4540,7 +4734,7 @@ struct KnowledgeBaseView: View {
                 trendPoints: trendPoints,
                 selectedGranularity: $selectedTrendGranularity,
                 categoryShares: categoryShares,
-                keywordNodes: keywordNetwork.nodes,
+                wordCloudItems: wordCloudItems,
                 compact: compact,
                 selectKeyword: { query = $0 }
             )
@@ -5076,7 +5270,7 @@ private struct KnowledgeInsightSection: View {
     let trendPoints: [KnowledgeTrendPoint]
     @Binding var selectedGranularity: KnowledgeTrendGranularity
     let categoryShares: [KnowledgeCategoryShare]
-    let keywordNodes: [KnowledgeKeywordNode]
+    let wordCloudItems: [KnowledgeWordCloudItem]
     let compact: Bool
     let selectKeyword: (String) -> Void
 
@@ -5098,7 +5292,7 @@ private struct KnowledgeInsightSection: View {
                 TypeBarChart(shares: categoryShares, compact: compact)
             }
 
-            TagCloudView(nodes: keywordNodes, compact: compact, selectKeyword: selectKeyword)
+            TagCloudView(items: wordCloudItems, compact: compact, selectKeyword: selectKeyword)
         }
     }
 }
@@ -5115,6 +5309,18 @@ private struct TrendMiniChart: View {
 
     private var maxCount: Int {
         max(visiblePoints.map(\.entryCount).max() ?? 1, 1)
+    }
+
+    private var isSparse: Bool {
+        visiblePoints.count <= 3
+    }
+
+    private var totalEntries: Int {
+        visiblePoints.reduce(0) { $0 + $1.entryCount }
+    }
+
+    private var totalWords: Int {
+        visiblePoints.reduce(0) { $0 + $1.wordCount }
     }
 
     var body: some View {
@@ -5149,6 +5355,27 @@ private struct TrendMiniChart: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(theme.palette.muted)
                         .frame(maxWidth: .infinity, minHeight: 72)
+                } else if isSparse {
+                    HStack(alignment: .top, spacing: compact ? 8 : 10) {
+                        ForEach(visiblePoints, id: \.bucketStart) { point in
+                            VStack(spacing: 4) {
+                                Text("\(point.entryCount)")
+                                    .font(.system(size: compact ? 20 : 23, weight: .bold, design: .rounded))
+                                    .foregroundStyle(theme.palette.text)
+                                Text(axisTitle(for: point))
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(theme.palette.muted.opacity(0.8))
+                                    .lineLimit(1)
+                                Text("\(point.wordCount) 字")
+                                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                                    .foregroundStyle(theme.palette.accent.opacity(0.82))
+                            }
+                            .frame(maxWidth: .infinity, minHeight: compact ? 66 : 74)
+                            .background(theme.palette.card.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(theme.palette.line.opacity(0.28), lineWidth: 1))
+                        }
+                    }
+                    .frame(height: compact ? 82 : 92)
                 } else {
                     HStack(alignment: .bottom, spacing: 6) {
                         ForEach(visiblePoints, id: \.bucketStart) { point in
@@ -5166,9 +5393,16 @@ private struct TrendMiniChart: View {
                     }
                     .frame(height: compact ? 82 : 92)
                 }
+
+                if !visiblePoints.isEmpty {
+                    Text("\(visiblePoints.count) 个周期 · \(totalEntries) 条沉淀 · \(totalWords) 字")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(theme.palette.muted.opacity(0.7))
+                }
             }
             .padding(14)
-            .frame(maxWidth: .infinity, minHeight: compact ? 154 : 170, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(height: compact ? 176 : 192, alignment: .topLeading)
         }
     }
 
@@ -5191,6 +5425,10 @@ private struct TypeBarChart: View {
         Array(shares.prefix(4))
     }
 
+    private var totalEntries: Int {
+        shares.reduce(0) { $0 + $1.entryCount }
+    }
+
     var body: some View {
         CognitiveGlassCard(level: .l2, radius: 20, isActive: false) {
             VStack(alignment: .leading, spacing: 12) {
@@ -5204,7 +5442,7 @@ private struct TypeBarChart: View {
                         .foregroundStyle(theme.palette.muted)
                         .frame(maxWidth: .infinity, minHeight: 92)
                 } else {
-                    VStack(spacing: 10) {
+                    VStack(spacing: compact ? 8 : 10) {
                         ForEach(visibleShares, id: \.category) { share in
                             VStack(alignment: .leading, spacing: 5) {
                                 HStack {
@@ -5229,22 +5467,34 @@ private struct TypeBarChart: View {
                             }
                         }
                     }
+                    if visibleShares.count <= 2 {
+                        HStack {
+                            Text("覆盖 \(shares.count) 类知识")
+                            Spacer()
+                            Text("\(totalEntries) 条沉淀")
+                        }
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(theme.palette.muted.opacity(0.7))
+                        .padding(.top, 2)
+                    }
                 }
+                Spacer(minLength: 0)
             }
             .padding(14)
-            .frame(maxWidth: .infinity, minHeight: compact ? 154 : 170, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(height: compact ? 176 : 192, alignment: .topLeading)
         }
     }
 }
 
 private struct TagCloudView: View {
     @Environment(\.appTheme) private var theme
-    let nodes: [KnowledgeKeywordNode]
+    let items: [KnowledgeWordCloudItem]
     let compact: Bool
     let selectKeyword: (String) -> Void
 
-    private var visibleNodes: [KnowledgeKeywordNode] {
-        Array(nodes.prefix(compact ? 10 : 12))
+    private var visibleItems: [KnowledgeWordCloudItem] {
+        Array(items.prefix(compact ? 10 : 14))
     }
 
     var body: some View {
@@ -5255,35 +5505,43 @@ private struct TagCloudView: View {
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.palette.text.opacity(0.86))
                     Spacer()
-                    Text("\(nodes.count) 个标签")
+                    Text("按频次与近期沉淀排序")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(theme.palette.muted.opacity(0.72))
                 }
 
-                if visibleNodes.isEmpty {
+                if visibleItems.isEmpty {
                     Text("继续沉淀后会形成可搜索标签。")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(theme.palette.muted)
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: compact ? 88 : 104), spacing: 8)], alignment: .leading, spacing: 8) {
-                        ForEach(visibleNodes) { node in
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: compact ? 112 : 132), spacing: 9)], alignment: .leading, spacing: 9) {
+                        ForEach(visibleItems) { item in
                             Button {
-                                selectKeyword(node.keyword)
+                                selectKeyword(item.keyword)
                             } label: {
-                                HStack(spacing: 6) {
+                                HStack(alignment: .top, spacing: 7) {
                                     Circle()
-                                        .fill(theme.palette.accent.opacity(0.7))
-                                        .frame(width: CGFloat(min(10, 5 + node.count)), height: CGFloat(min(10, 5 + node.count)))
-                                    Text(node.keyword)
-                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .fill(tagColor(for: item).opacity(0.9))
+                                        .frame(width: dotSize(for: item), height: dotSize(for: item))
+                                        .padding(.top, 4)
+                                    Text(item.keyword)
+                                        .font(.system(size: fontSize(for: item), weight: fontWeight(for: item), design: .rounded))
                                         .foregroundStyle(theme.palette.text.opacity(0.86))
-                                        .lineLimit(1)
+                                        .multilineTextAlignment(.leading)
+                                        .fixedSize(horizontal: false, vertical: true)
                                     Spacer(minLength: 0)
+                                    if item.tier == .primary {
+                                        Text("\(item.count)")
+                                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                                            .foregroundStyle(tagColor(for: item).opacity(0.9))
+                                    }
                                 }
                                 .padding(.horizontal, 10)
-                                .frame(height: 32)
-                                .background(theme.palette.card.opacity(0.14), in: Capsule())
-                                .overlay(Capsule().stroke(theme.palette.line.opacity(0.38), lineWidth: 1))
+                                .padding(.vertical, verticalPadding(for: item))
+                                .frame(maxWidth: .infinity, minHeight: minimumHeight(for: item), alignment: .leading)
+                                .background(tagColor(for: item).opacity(item.tier == .primary ? 0.16 : 0.09), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(tagColor(for: item).opacity(item.tier == .primary ? 0.62 : 0.30), lineWidth: 1))
                             }
                             .buttonStyle(.plain)
                             .focusable(false)
@@ -5294,6 +5552,49 @@ private struct TagCloudView: View {
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+    }
+
+    private func tagColor(for item: KnowledgeWordCloudItem) -> Color {
+        switch item.tier {
+        case .primary:
+            return theme.palette.accent
+        case .secondary:
+            return theme.palette.accent.opacity(0.82)
+        case .tertiary:
+            return theme.palette.muted.opacity(0.92)
+        }
+    }
+
+    private func fontSize(for item: KnowledgeWordCloudItem) -> CGFloat {
+        switch item.tier {
+        case .primary: return compact ? 13 : 14
+        case .secondary: return compact ? 12 : 12.5
+        case .tertiary: return 11.5
+        }
+    }
+
+    private func fontWeight(for item: KnowledgeWordCloudItem) -> Font.Weight {
+        switch item.tier {
+        case .primary: return .bold
+        case .secondary: return .semibold
+        case .tertiary: return .medium
+        }
+    }
+
+    private func dotSize(for item: KnowledgeWordCloudItem) -> CGFloat {
+        switch item.tier {
+        case .primary: return 9
+        case .secondary: return 7
+        case .tertiary: return 6
+        }
+    }
+
+    private func verticalPadding(for item: KnowledgeWordCloudItem) -> CGFloat {
+        item.tier == .primary ? 9 : 7
+    }
+
+    private func minimumHeight(for item: KnowledgeWordCloudItem) -> CGFloat {
+        item.tier == .primary ? 42 : 36
     }
 }
 

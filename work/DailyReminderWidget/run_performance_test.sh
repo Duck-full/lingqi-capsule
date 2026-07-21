@@ -16,6 +16,7 @@ swiftc \
   -target "$TARGET" \
   -parse-as-library \
   "$ROOT/Sources/DailyReminderWidget.swift" \
+  "$ROOT/Sources/KnowledgeBaseCore.swift" \
   "$ROOT/Performance/PerformanceBenchmark.swift" \
   -o "$BIN" \
   -framework SwiftUI \

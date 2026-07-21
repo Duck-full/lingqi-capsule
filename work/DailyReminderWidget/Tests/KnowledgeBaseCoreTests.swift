@@ -7,6 +7,7 @@ struct KnowledgeBaseCoreTests {
         testSearchMatchesKeywordCategoryAndBody()
         testProfileAggregatesTopDimensions()
         testKnowledgeTagsAvoidBrokenFragmentsAndPreferSemanticPhrases()
+        testBuildsSemanticWordCloudWithoutTextTruncation()
         testAppliesManualCategoryAndEditedTags()
         testPublishedStatusScopesKnowledgeSearch()
         testCreatesBatchExportBundleByCategoryAndMonth()
@@ -18,6 +19,7 @@ struct KnowledgeBaseCoreTests {
         testCategorySharesSortAndRatio()
         testKeywordNetworkBuildsCoOccurrenceEdges()
         testExportBundleIncludesFilterAndProfileContext()
+        testPreFilteredAnalyticsMatchFilteredAnalytics()
         testLargeKnowledgeSetKeepsAggregationsBounded()
         print("KnowledgeBaseCoreTests passed")
     }
@@ -106,6 +108,43 @@ struct KnowledgeBaseCoreTests {
         assert(entry.keywords.contains("数据口径"), "expected complete semantic phrase")
         assert(entry.keywords.contains("统计规则"), "expected complete semantic phrase")
         assert(entry.keywords.contains("字段说明") || entry.keywords.contains("数据标准"), "expected complete supporting semantic phrase")
+    }
+
+    private static func testBuildsSemanticWordCloudWithoutTextTruncation() {
+        let entries = [
+            KnowledgeEntry(
+                id: UUID(),
+                date: fixedDate("2026-07-17"),
+                title: "数据标准复核",
+                summary: "复核城市管理驾驶舱的数据口径。",
+                keywords: ["应急联动方向", "数据标准"],
+                category: .projectManagement,
+                mood: "专注",
+                sourceText: "复核城市管理驾驶舱的数据口径，并同步整理统计规则。",
+                wordCount: 18,
+                status: .published
+            ),
+            KnowledgeEntry(
+                id: UUID(),
+                date: fixedDate("2026-07-18"),
+                title: "应急联动梳理",
+                summary: "继续梳理应急联动方向和统计规则。",
+                keywords: ["应急联动方向", "统计规则"],
+                category: .projectManagement,
+                mood: "平稳",
+                sourceText: "继续梳理应急联动方向和统计规则。",
+                wordCount: 14,
+                status: .published
+            )
+        ]
+
+        let cloud = KnowledgeBaseService.wordCloud(from: entries, limit: 5)
+
+        assert(cloud.first?.keyword == "应急联动方向", "expected complete phrase to be retained")
+        assert(cloud.first?.count == 2, "expected repeated phrase count")
+        assert(cloud.first?.tier == KnowledgeWordCloudTier.primary, "expected the highest frequency phrase to be primary")
+        assert(cloud.contains(where: { $0.keyword == "数据标准" }), "expected supporting phrase")
+        assert(!cloud.contains(where: { $0.keyword == "应急联" }), "must not truncate semantic phrases")
     }
 
     private static func testAppliesManualCategoryAndEditedTags() {
@@ -328,6 +367,35 @@ struct KnowledgeBaseCoreTests {
         assert(bundle.readableText.contains("工程技术"), "expected category context")
         assert(bundle.readableText.contains("专注"), "expected mood context")
         assert(bundle.readableText.contains("SwiftUI"), "expected profile keyword context")
+    }
+
+    private static func testPreFilteredAnalyticsMatchFilteredAnalytics() {
+        let rawEntries = KnowledgeBaseService.entries(from: [
+            KnowledgeSourceEntry(date: fixedDate("2026-06-01"), text: "完成 SwiftUI 性能优化和构建脚本整理。", keywords: ["SwiftUI", "性能优化", "构建脚本"], summary: "工程记录。", mood: "专注"),
+            KnowledgeSourceEntry(date: fixedDate("2026-06-02"), text: "整理 macOS 通知与打包签名流程。", keywords: ["macOS", "通知", "打包签名"], summary: "工程记录。", mood: "专注"),
+            KnowledgeSourceEntry(date: fixedDate("2026-06-03"), text: "优化产品体验和页面留白。", keywords: ["产品体验", "页面留白"], summary: "产品记录。", mood: "平稳")
+        ])
+        let entries = rawEntries.enumerated().map { index, entry in
+            KnowledgeBaseService.applyStatus(to: entry, status: index < 2 ? .published : .inbox)
+        }
+        let filter = KnowledgeSearchFilter(category: .engineering, mood: "专注", status: .published)
+        let filtered = KnowledgeBaseService.search(entries, filter: filter)
+
+        assert(
+            KnowledgeBaseService.trend(from: entries, filter: filter, granularity: .month)
+                == KnowledgeBaseService.trend(from: filtered, granularity: .month),
+            "expected pre-filtered trend to match filtered trend"
+        )
+        assert(
+            KnowledgeBaseService.categoryShares(from: entries, filter: filter)
+                == KnowledgeBaseService.categoryShares(from: filtered),
+            "expected pre-filtered category shares to match filtered shares"
+        )
+        assert(
+            KnowledgeBaseService.keywordNetwork(from: entries, filter: filter, maxNodes: 6, maxEdges: 6)
+                == KnowledgeBaseService.keywordNetwork(from: filtered, maxNodes: 6, maxEdges: 6),
+            "expected pre-filtered keyword network to match filtered network"
+        )
     }
 
     private static func testLargeKnowledgeSetKeepsAggregationsBounded() {
