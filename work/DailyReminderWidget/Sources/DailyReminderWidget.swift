@@ -4436,6 +4436,7 @@ struct KnowledgeBaseView: View {
     @State private var keywordNetwork = KnowledgeKeywordNetwork(nodes: [], edges: [])
     @State private var wordCloudItems: [KnowledgeWordCloudItem] = []
     @State private var detailEntry: KnowledgeEntry?
+    @State private var showingKnowledgeTransfer = false
     @State private var entryOverrides: [String: KnowledgeEntryOverride] = [:]
     @State private var hasLoadedKnowledgePage = false
     @State private var pendingKnowledgeReload: DispatchWorkItem?
@@ -4577,6 +4578,13 @@ struct KnowledgeBaseView: View {
             .padding(.horizontal, compact ? 20 : 32)
             .padding(.bottom, 26)
         }
+        .sheet(isPresented: $showingKnowledgeTransfer) {
+            KnowledgeDataManagementSheet(entries: knowledgeEntries) { importedEntries in
+                let added = try KnowledgeImportedEntryStore.append(importedEntries, excluding: knowledgeEntries)
+                reloadKnowledge()
+                return added
+            }
+        }
         .onAppear {
             loadOverrides()
             reloadKnowledge()
@@ -4616,7 +4624,9 @@ struct KnowledgeBaseView: View {
                     mood: capsule.mood
                 )
             }
-        let newEntries = KnowledgeBaseService.entries(from: sources).map(applyOverride)
+        let sourceEntries = KnowledgeBaseService.entries(from: sources)
+        let importedEntries = KnowledgeImportedEntryStore.load()
+        let newEntries = KnowledgeTransferService.mergeImported(importedEntries, onto: sourceEntries).map(applyOverride)
         knowledgeEntries = newEntries
         refreshKnowledgeDerivedState(allEntries: newEntries)
         if let detailEntry, let refreshed = newEntries.first(where: { $0.id == detailEntry.id }) {
@@ -4704,6 +4714,14 @@ struct KnowledgeBaseView: View {
                     .noWrap(scale: 0.72)
             }
             Spacer()
+            Button {
+                showingKnowledgeTransfer = true
+            } label: {
+                Label("数据管理", systemImage: "arrow.left.arrow.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .noWrap(scale: 0.78)
+            }
+            .buttonStyle(SecondaryButtonStyle())
             Button {
                 showingKnowledgeBase = false
                 selectedDate = Date()
@@ -4994,6 +5012,336 @@ struct KnowledgeBaseView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 260)
         .glassPanel(radius: 24)
+    }
+}
+
+private enum KnowledgeTransferExportScope: String, CaseIterable, Identifiable {
+    case all = "全部已沉淀"
+    case custom = "自定义时间"
+
+    var id: String { rawValue }
+}
+
+private struct KnowledgePendingImport {
+    enum Kind {
+        case template
+        case backup
+
+        var title: String {
+            switch self {
+            case .template: return "知识模板导入"
+            case .backup: return "本地备份恢复"
+            }
+        }
+    }
+
+    let kind: Kind
+    let entries: [KnowledgeEntry]
+    let issues: [KnowledgeTransferValidationIssue]
+
+    var canConfirm: Bool {
+        !entries.isEmpty && !issues.contains(where: { $0.severity == .error })
+    }
+}
+
+private struct KnowledgeDataManagementSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
+
+    let entries: [KnowledgeEntry]
+    let importEntries: ([KnowledgeEntry]) throws -> Int
+
+    @State private var exportScope: KnowledgeTransferExportScope = .all
+    @State private var startDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
+    @State private var endDate = Date()
+    @State private var pendingImport: KnowledgePendingImport?
+    @State private var statusMessage = ""
+    @State private var statusIsError = false
+
+    private var exportRange: KnowledgeTimeRange? {
+        guard exportScope == .custom else { return nil }
+        let start = min(startDate, endDate)
+        let end = max(startDate, endDate)
+        let dayEnd = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: end) ?? end
+        return KnowledgeTimeRange(start: Calendar.current.startOfDay(for: start), end: dayEnd)
+    }
+
+    private var exportFilter: KnowledgeSearchFilter {
+        KnowledgeSearchFilter(timeRange: exportRange, status: .published)
+    }
+
+    private var exportCount: Int {
+        KnowledgeBaseService.search(entries, filter: exportFilter).count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "arrow.left.arrow.right.circle.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(theme.palette.accent)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("知识数据管理")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.palette.text)
+                    Text("导出可复用知识，或通过固定模板安全导入与本地备份恢复。")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(theme.palette.muted)
+                }
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(IconButtonStyle())
+            }
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    exportSection
+                    importSection
+                    backupSection
+
+                    if let pendingImport {
+                        importConfirmation(pendingImport)
+                    }
+
+                    if !statusMessage.isEmpty {
+                        Label(statusMessage, systemImage: statusIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(statusIsError ? Color.red.opacity(0.85) : theme.palette.accent)
+                            .padding(.horizontal, 4)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            HStack {
+                Text("导入与恢复均采用追加去重，不会覆盖已有知识记录。")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.muted)
+                Spacer()
+                Button("完成") { dismiss() }
+                    .buttonStyle(PrimaryButtonStyle())
+            }
+        }
+        .padding(24)
+        .frame(width: 720, height: 680)
+        .background(theme.palette.ink)
+    }
+
+    private var exportSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionHeading("导出知识", systemImage: "doc.richtext")
+            Text("仅导出已沉淀知识；Word 将自动包含封面、目录式层级、时间范围、分类与正文，适合阅读和留档。")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.palette.muted)
+
+            Picker("范围", selection: $exportScope) {
+                ForEach(KnowledgeTransferExportScope.allCases) { scope in
+                    Text(scope.rawValue).tag(scope)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if exportScope == .custom {
+                HStack(spacing: 12) {
+                    DatePicker("开始", selection: $startDate, displayedComponents: .date)
+                    DatePicker("结束", selection: $endDate, displayedComponents: .date)
+                }
+                .font(.system(size: 12, weight: .semibold))
+            }
+
+            HStack {
+                Text("当前范围内 (exportCount) 条已沉淀知识")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.palette.accent)
+                Spacer()
+                Button {
+                    exportWord()
+                } label: {
+                    Label("导出 Word", systemImage: "doc.text")
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(exportCount == 0)
+            }
+        }
+        .padding(16)
+        .glassPanel(radius: 18)
+    }
+
+    private var importSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeading("固定模板导入", systemImage: "square.and.arrow.down")
+            Text("先下载 CSV 模板填写。选择文件后会先校验表头、日期、分类、状态、正文和重复条目，确认后才写入。")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.palette.muted)
+            HStack(spacing: 10) {
+                Button {
+                    saveImportTemplate()
+                } label: {
+                    Label("下载导入模板", systemImage: "arrow.down.doc")
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                Button {
+                    chooseImport(kind: .template)
+                } label: {
+                    Label("选择 CSV 导入", systemImage: "folder")
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                Spacer()
+            }
+        }
+        .padding(16)
+        .glassPanel(radius: 18)
+    }
+
+    private var backupSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeading("本地备份与恢复", systemImage: "externaldrive")
+            Text("导出 JSON 备份可完整保留知识内容；恢复前会校验版本和完整性，恢复时只追加不存在的条目。")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.palette.muted)
+            HStack(spacing: 10) {
+                Button {
+                    exportBackup()
+                } label: {
+                    Label("导出本地备份", systemImage: "arrow.up.doc")
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                Button {
+                    chooseImport(kind: .backup)
+                } label: {
+                    Label("恢复备份", systemImage: "arrow.clockwise.doc")
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                Spacer()
+            }
+        }
+        .padding(16)
+        .glassPanel(radius: 18)
+    }
+
+    private func importConfirmation(_ pending: KnowledgePendingImport) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(pending.kind.title)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(theme.palette.text)
+                Spacer()
+                Text("识别到 (pending.entries.count) 条")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(theme.palette.accent)
+            }
+
+            if pending.issues.isEmpty {
+                Label("格式校验通过，确认后将以追加去重方式写入。", systemImage: "checkmark.seal.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.palette.accent)
+            } else {
+                ForEach(Array(pending.issues.prefix(3))) { issue in
+                    Text((issue.line.map { "第 \($0) 行：" } ?? "") + issue.message)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(issue.severity == .error ? Color.red.opacity(0.85) : theme.palette.muted)
+                }
+            }
+
+            HStack {
+                Button("取消") { pendingImport = nil }
+                    .buttonStyle(SecondaryButtonStyle())
+                Spacer()
+                Button("确认导入") { confirmImport() }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(!pending.canConfirm)
+            }
+        }
+        .padding(16)
+        .glassPanel(radius: 18, active: pending.canConfirm)
+    }
+
+    private func sectionHeading(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 16, weight: .bold))
+            .foregroundStyle(theme.palette.text)
+    }
+
+    private func exportWord() {
+        guard exportCount > 0 else {
+            report("当前范围内没有可导出的已沉淀知识。", isError: true)
+            return
+        }
+        let bundle = KnowledgeBaseService.exportBundle(from: entries, filter: exportFilter, includeProfile: true)
+        NoteExporter.exportKnowledgeDocx(bundle: bundle)
+        report("已打开 Word 导出保存位置。", isError: false)
+    }
+
+    private func saveImportTemplate() {
+        saveData(Data(("\u{FEFF}" + KnowledgeTransferService.importTemplateText).utf8), suggestedName: "灵栖胶囊知识导入模板.csv", allowedTypes: ["csv"])
+    }
+
+    private func exportBackup() {
+        do {
+            let data = try KnowledgeTransferService.makeBackup(entries: entries)
+            saveData(data, suggestedName: "灵栖胶囊知识备份.json", allowedTypes: ["json"])
+        } catch {
+            report(error.localizedDescription, isError: true)
+        }
+    }
+
+    private func chooseImport(kind: KnowledgePendingImport.Kind) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedFileTypes = kind == .template ? ["csv"] : ["json"]
+        panel.message = kind == .template ? "选择按固定模板填写的 CSV 文件" : "选择由灵栖胶囊导出的 JSON 备份文件"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            switch kind {
+            case .template:
+                let preview = try KnowledgeTransferService.previewImport(csvData: data)
+                pendingImport = KnowledgePendingImport(kind: kind, entries: preview.entries, issues: preview.issues)
+                report(preview.canImport ? "CSV 已通过校验，请确认导入。" : "CSV 存在格式问题，请先修正。", isError: !preview.canImport)
+            case .backup:
+                let restored = try KnowledgeTransferService.restoreBackup(data: data)
+                pendingImport = KnowledgePendingImport(kind: kind, entries: restored, issues: [])
+                report("备份文件校验通过，请确认恢复。", isError: false)
+            }
+        } catch {
+            pendingImport = nil
+            report(error.localizedDescription, isError: true)
+        }
+    }
+
+    private func confirmImport() {
+        guard let pendingImport else { return }
+        do {
+            let added = try importEntries(pendingImport.entries)
+            self.pendingImport = nil
+            report(added > 0 ? "已新增 (added) 条知识，重复内容已自动跳过。" : "没有新增内容，已存在的条目已自动跳过。", isError: false)
+        } catch {
+            report("导入失败：\(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func saveData(_ data: Data, suggestedName: String, allowedTypes: [String]) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = suggestedName
+        panel.allowedFileTypes = allowedTypes
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try data.write(to: url, options: .atomic)
+            report("文件已保存。", isError: false)
+        } catch {
+            report("保存失败：\(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func report(_ message: String, isError: Bool) {
+        statusMessage = message
+        statusIsError = isError
     }
 }
 

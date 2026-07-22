@@ -21,6 +21,10 @@ struct KnowledgeBaseCoreTests {
         testExportBundleIncludesFilterAndProfileContext()
         testPreFilteredAnalyticsMatchFilteredAnalytics()
         testLargeKnowledgeSetKeepsAggregationsBounded()
+        testPreviewsStrictKnowledgeCSVImport()
+        testRejectsMalformedKnowledgeCSVWithoutEntries()
+        testKnowledgeBackupRoundTripAndTamperRejection()
+        testMergeImportedKnowledgeAvoidsDuplicates()
         print("KnowledgeBaseCoreTests passed")
     }
 
@@ -426,6 +430,92 @@ struct KnowledgeBaseCoreTests {
         assert(!shares.isEmpty, "expected category shares")
         assert(network.nodes.count <= 4, "expected bounded nodes")
         assert(network.edges.count <= 4, "expected bounded edges")
+    }
+
+    private static func testPreviewsStrictKnowledgeCSVImport() {
+        let csv = """
+        日期,标题,摘要,正文,分类,关键词,心情,状态
+        2026-07-21,应急联动方案,梳理跨部门协同,完成应急联动方向与数据口径的完整梳理。,项目推进,应急联动方向；数据口径,专注,published
+        """
+
+        let preview = try! KnowledgeTransferService.previewImport(csvData: Data(csv.utf8))
+
+        assert(preview.canImport, "expected fixed template to pass validation")
+        assert(preview.entries.count == 1, "expected one imported knowledge entry")
+        assert(preview.entries[0].category == .projectManagement, "expected Chinese category mapping")
+        assert(preview.entries[0].keywords == ["应急联动方向", "数据口径"], "expected complete semantic tags")
+        assert(preview.entries[0].status == .published, "expected published status")
+    }
+
+    private static func testRejectsMalformedKnowledgeCSVWithoutEntries() {
+        let malformed = """
+        日期,标题,摘要,正文,分类,关键词,心情,状态
+        2026/07/21,错误日期,摘要,正文,项目推进,数据口径,专注,published
+        """
+
+        let preview = try! KnowledgeTransferService.previewImport(csvData: Data(malformed.utf8))
+
+        assert(!preview.canImport, "expected malformed date to block import")
+        assert(preview.entries.isEmpty, "expected invalid rows to stay out of the preview")
+        assert(preview.issues.contains(where: { $0.message.contains("日期") }), "expected date validation message")
+    }
+
+    private static func testKnowledgeBackupRoundTripAndTamperRejection() {
+        let entry = KnowledgeEntry(
+            id: UUID(),
+            date: fixedDate("2026-07-21"),
+            title: "完整备份",
+            summary: "验证本地备份完整性。",
+            keywords: ["本地备份"],
+            category: .engineering,
+            mood: "平稳",
+            sourceText: "验证本地备份完整性与恢复校验。",
+            wordCount: 15,
+            status: .published
+        )
+
+        let data = try! KnowledgeTransferService.makeBackup(entries: [entry])
+        let restored = try! KnowledgeTransferService.restoreBackup(data: data)
+
+        assert(restored == [entry], "expected backup round trip to preserve entries")
+        var tampered = data
+        tampered[tampered.startIndex] ^= 0x01
+        do {
+            _ = try KnowledgeTransferService.restoreBackup(data: tampered)
+            assertionFailure("expected tampered backup to be rejected")
+        } catch {
+            assert(true, "expected checksum validation failure")
+        }
+    }
+
+    private static func testMergeImportedKnowledgeAvoidsDuplicates() {
+        let entry = KnowledgeEntry(
+            id: UUID(),
+            date: fixedDate("2026-07-21"),
+            title: "去重知识",
+            summary: "相同内容只应保留一条。",
+            keywords: ["去重"],
+            category: .projectManagement,
+            mood: "专注",
+            sourceText: "相同内容只应保留一条，避免本地备份恢复造成重复。",
+            wordCount: 24,
+            status: .published
+        )
+        let duplicate = KnowledgeEntry(
+            id: UUID(),
+            date: entry.date,
+            title: entry.title,
+            summary: entry.summary,
+            keywords: entry.keywords,
+            category: entry.category,
+            mood: entry.mood,
+            sourceText: entry.sourceText,
+            wordCount: entry.wordCount,
+            status: entry.status
+        )
+
+        let merged = KnowledgeTransferService.mergeImported([duplicate], onto: [entry])
+        assert(merged.count == 1, "expected semantic duplicate to be merged once")
     }
 
     private static func fixedDate(_ value: String) -> Date {
