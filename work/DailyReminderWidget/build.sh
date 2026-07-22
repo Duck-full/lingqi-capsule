@@ -103,7 +103,7 @@ for BACKGROUND in "$ROOT"/Assets/ImmersiveVistaBackground*.jpg; do
   fi
 done
 
-swiftc -Onone -target "$BUILD_ARCH-apple-macos13.1" -parse-as-library "$ROOT/Sources/KnowledgeBaseCore.swift" "$ROOT/Sources/DailyReminderWidget.swift" -o "$MACOS/DailyReminderWidget" -framework SwiftUI -framework AppKit -framework UserNotifications
+swiftc -Onone -target "$BUILD_ARCH-apple-macos13.1" -parse-as-library "$ROOT/Sources/KnowledgeBaseCore.swift" "$ROOT/Sources/KnowledgeTransferCore.swift" "$ROOT/Sources/DailyReminderWidget.swift" -o "$MACOS/DailyReminderWidget" -framework SwiftUI -framework AppKit -framework UserNotifications
 
 chmod +x "$MACOS/DailyReminderWidget"
 if [[ -n "$SIGN_IDENTITY" ]]; then
